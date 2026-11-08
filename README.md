@@ -90,126 +90,108 @@ Dokumen final referensi dikirim ke model sebagai contoh gaya, jadi jangan unggah
 
 Menu **PPT → DOCX** membuat dokumen Word dari PPT dengan format, gaya, dan susunan gambar yang meniru dokumen referensi. Fakta hanya berasal dari PPT; format dan gaya berasal dari *profil* jenis dokumen.
 
-### Alur kerja (activity diagram)
+### Alur kerja (sequence diagram)
 
-Diagram ini menunjukkan apa yang terjadi sejak PPT diunggah sampai DOCX bisa diunduh. Kotak abu-abu menandai langkah yang memanggil model di Amazon Bedrock; "paralel" berarti dikerjakan beberapa worker sekaligus (jumlahnya dipilih di form).
-
-```mermaid
-flowchart TD
-    mulai(["● Mulai"]) --> pilih
-
-    subgraph PENGGUNA["Pengguna (menu PPT → DOCX)"]
-        pilih["Pilih jenis dokumen (profil), unggah .pptx,<br/>isi struktur bab, pilih model, worker, pecah panel"]
-        lihat["Lihat laporan verifikasi"]
-        unduh["Unduh DOCX"]
-    end
-
-    pilih --> validasi{"Valid?<br/>.pptx, 1–20 bab, profil ada"}
-    validasi -- "tidak" --> tolak["Tampilkan pesan error"]
-    tolak --> selesaiGagal(["● Selesai: gagal"])
-    validasi -- "ya" --> sesi["Simpan unggahan, buat sesi,<br/>jalankan job di thread latar"]
-
-    subgraph JOB["Server: job latar (progres dipantau lewat polling)"]
-        direction TB
-        sesi --> L1
-
-        subgraph S1["1. Ekstrak slide"]
-            direction TB
-            L1["Baca PPTX: teks, tabel, chart, catatan,<br/>kotak panel, blok teks asli"] --> L2["Tandai sampul dan lampiran<br/>(dikeluarkan dari semua proses)"]
-            L2 --> L3["Render slide bergambar jadi PNG<br/>(LibreOffice + pdftoppm)"]
-            L3 --> L4{"Pecah panel?"}
-            L4 -- "ya, bila 2 panel atau lebih terdeteksi" --> L5["Potong tiap panel<br/>(judul panel jadi caption)"]
-            L4 -- "tidak" --> L6
-            L5 --> L6["Pisahkan blok teks asli:<br/>Hasil Pembahasan Dewan Gubernur,<br/>Key Takeaways"]
-        end
-
-        L6 --> semua{"Masih ada slide?"}
-        semua -- "tidak" --> gagalJob["Berhenti dengan error"]
-        semua -- "ya" --> V1
-
-        subgraph S2["2. Deskripsi visual (paralel)"]
-            V1["Slide bergambar yang tidak dipecah:<br/>model mendeskripsikan gambar"]:::model
-        end
-
-        V1 --> M1{"Mode pemetaan"}
-
-        subgraph S3["3. Petakan slide ke bab"]
-            M1 -- "sekaligus" --> M2["1 panggilan model<br/>(maksimal 3 percobaan)"]:::model
-            M1 -- "per slide" --> M3["Klasifikasi tiap slide (paralel)"]:::model
-        end
-
-        M2 --> C1
-        M3 --> C1
-
-        subgraph S4["4. Ringkas gambar untuk caption (paralel)"]
-            C1{"Slide di bab kesimpulan<br/>atau arahan?"}
-            C1 -- "ya" --> C2["Lewati: tanpa ringkasan"]
-            C1 -- "tidak" --> C3["Model meringkas tiap gambar atau panel<br/>1–2 kalimat, dari gambarnya"]:::model
-            C3 --> C4{"Ada angka yang tidak<br/>ada di teks slide?"}
-            C4 -- "ya" --> C5["Tulis ulang sekali tanpa angka itu;<br/>sisanya dilaporkan"]:::model
-            C4 -- "tidak" --> C6["Ringkasan diterima"]
-            C5 --> C6
-        end
-
-        C2 --> N1
-        C6 --> N1
-
-        subgraph S5["5. Narasi per bab (paralel)"]
-            N1{"Bab kesimpulan<br/>atau arahan?"}
-            N1 -- "ya" --> N2["Tanpa model: teks slide<br/>dibawa apa adanya"]
-            N1 -- "tidak" --> N3["Model menulis narasi paragraf<br/>dari teks slide (kelompok kecil)"]:::model
-            N3 --> N4{"Valid dan angkanya<br/>cocok dengan slide?"}
-            N4 -- "tidak, percobaan pertama" --> N3
-            N4 -- "tidak, tetap gagal" --> N5["Pakai teks slide apa adanya<br/>dan catat di laporan"]
-            N4 -- "ya" --> N6["Narasi diterima"]
-        end
-
-        N5 --> gagalBeruntun{"3 bab gagal total sebelum<br/>ada yang berhasil?"}
-        gagalBeruntun -- "ya (kredensial atau jaringan)" --> gagalJob
-        gagalBeruntun -- "tidak" --> B1
-        N2 --> B1
-        N6 --> B1
-
-        subgraph S6["6. Rakit dokumen"]
-            B1["Susun blok per bab: judul bertingkat, teks asli,<br/>tabel gambar | caption, narasi paragraf;<br/>slide pembatas dibuang"] --> B2["Tulis DOCX: font, margin, nomor halaman,<br/>border tabel 1 pt, nomor caption"]
-            B2 --> B3["Hitung laporan verifikasi: gambar terpakai sekali,<br/>angka, bab cadangan, slide dikecualikan"]
-        end
-
-        B3 --> akhir["Bersihkan berkas sementara,<br/>catat durasi dan token ke PostgreSQL"]
-        gagalJob --> akhir
-    end
-
-    akhir --> status{"Berhasil?"}
-    status -- "ya" --> lihat
-    lihat --> unduh
-    unduh --> selesai(["● Selesai"])
-    status -- "tidak" --> tampilError["Tampilkan error dan langkah yang gagal"]
-    tampilError --> selesaiGagal
-
-    classDef model fill:#e5e7eb,stroke:#6b7280,color:#111827
-```
-
-Aturan keputusan saat menyusun tiap slide ke dokumen:
+Diagram ini menunjukkan urutan interaksi sejak PPT diunggah sampai DOCX diunduh. Blok `par` berarti dikerjakan bersamaan: job berjalan di thread latar sementara halaman memantau progresnya, dan panggilan ke Bedrock dikerjakan beberapa worker sekaligus (jumlahnya dipilih di form).
 
 ```mermaid
-flowchart TD
-    a(["Slide dalam sebuah bab"]) --> b{"Sampul atau lampiran?"}
-    b -- "ya" --> x1["Dibuang dari semua proses"]
-    b -- "tidak" --> c{"Slide pembatas?<br/>(teks pendek berupa label,<br/>tanpa judul, tabel, chart)"}
-    c -- "ya" --> x2["Dilewati, dicatat di laporan"]
-    c -- "tidak" --> d{"Bab kesimpulan<br/>atau arahan?"}
-    d -- "ya" --> t1["Seluruh teks slide apa adanya<br/>(label huruf kapital tebal, sisanya butir)"]
-    d -- "tidak" --> e{"Ada blok Hasil Pembahasan<br/>Dewan Gubernur atau Key Takeaways?"}
-    e -- "ya" --> t2["Blok itu apa adanya di atas gambar;<br/>sisa teks tetap dinarasikan"]
-    e -- "tidak" --> f{"Perlu gambar?<br/>(chart, diagram, tabel angka,<br/>atau gambar dengan teks pendek)"}
-    t2 --> f
-    f -- "tidak" --> p1["Narasi paragraf di bawah judul slide<br/>(tabel teks dan slide padat teks<br/>ditulis sebagai teks)"]
-    f -- "ya" --> g{"Bisa dipecah<br/>menjadi 2 panel atau lebih?"}
-    g -- "ya" --> h1["Satu baris tabel per panel:<br/>gambar | judul panel + ringkasan"]
-    g -- "tidak" --> h2["Satu baris tabel:<br/>gambar slide utuh | ringkasan"]
-    h1 --> n["Narasi paragraf di bawah tabel"]
-    h2 --> n
+sequenceDiagram
+    autonumber
+    actor U as Pengguna (browser)
+    participant A as Server Flask
+    participant J as Job latar (thread)
+    participant P as Profil jenis dokumen
+    participant X as PPTX dan LibreOffice
+    participant M as Amazon Bedrock
+    participant W as Pembuat DOCX
+    participant D as PostgreSQL
+
+    U->>A: POST /api/docx/start (pptx, struktur bab, profil, model, worker)
+    A->>A: Validasi file .pptx, 1 sampai 20 bab, mode pemetaan
+    A->>P: Cek profil ada
+    alt Tidak valid
+        A-->>U: 400 dan pesan error
+    else Valid
+        A->>J: Mulai job (simpan unggahan, buat sesi)
+        A-->>U: session_id dan daftar langkah
+    end
+
+    par Job latar
+        Note over J,X: Langkah 1. Ekstrak slide
+        J->>X: Baca teks, tabel, chart, catatan, kotak panel, blok teks asli
+        X-->>J: Daftar slide
+        J->>J: Keluarkan sampul dan lampiran dari semua proses
+        J->>X: Render slide bergambar jadi PNG
+        X-->>J: PNG per slide
+        J->>J: Potong panel dan pisahkan blok teks asli
+        J->>P: Muat pengaturan, pola baris, properti halaman, gaya
+
+        Note over J,M: Langkah 2. Deskripsi visual (paralel)
+        J->>M: Deskripsikan slide bergambar yang tidak dipecah
+        M-->>J: Deskripsi visual
+
+        Note over J,M: Langkah 3. Petakan slide ke bab
+        alt Mode sekaligus
+            J->>M: Satu panggilan untuk semua slide (maksimal 3 percobaan)
+        else Mode per slide
+            J->>M: Klasifikasi tiap slide (paralel)
+        end
+        M-->>J: Slide per bab
+
+        Note over J,M: Langkah 4. Ringkas gambar (paralel, kecuali bab kesimpulan dan arahan)
+        J->>M: Ringkas tiap gambar atau panel menjadi 1 sampai 2 kalimat
+        M-->>J: Ringkasan
+        opt Ada angka yang tidak ada di teks slide
+            J->>M: Tulis ulang tanpa angka itu (sekali)
+            M-->>J: Ringkasan baru, sisa angka masuk laporan
+        end
+
+        Note over J,M: Langkah 5. Narasi per bab (paralel, kecuali bab kesimpulan dan arahan)
+        J->>M: Tulis narasi paragraf dari teks slide
+        M-->>J: Narasi
+        alt Narasi tidak valid atau angkanya tidak cocok
+            J->>M: Ulangi sekali dengan umpan balik
+            M-->>J: Narasi baru
+        end
+        opt Tetap gagal
+            J->>J: Pakai teks slide apa adanya dan catat di laporan
+        end
+        opt 3 bab gagal total sebelum ada yang berhasil
+            J->>J: Hentikan job dengan error aslinya
+        end
+
+        Note over J,W: Langkah 6. Rakit dokumen
+        J->>W: Susun blok per bab dan tulis DOCX
+        W-->>J: Berkas DOCX (font, margin, nomor halaman, border tabel 1 pt)
+        J->>J: Hitung laporan verifikasi
+        J->>D: Catat durasi dan token per langkah
+    and Pemantauan progres
+        loop Selama job berjalan
+            U->>A: GET /api/docx/status/session_id
+            A-->>U: Status tiap langkah dan angka progres
+        end
+    end
+
+    U->>A: GET /api/docx/status/session_id
+    alt Job gagal
+        A-->>U: Error dan langkah yang gagal
+    else Job selesai
+        A-->>U: Laporan verifikasi dan tautan unduh
+        U->>A: GET /api/docx/download/session_id
+        A-->>U: Berkas .docx
+    end
 ```
+
+Aturan yang dipakai pada langkah penyusunan (6) untuk tiap slide:
+
+| Kondisi slide | Hasil di dokumen |
+|---|---|
+| Sampul atau lampiran | Dibuang dari semua proses |
+| Slide pembatas (teks pendek berupa label, tanpa judul, tabel, chart) | Dilewati dan dicatat di laporan |
+| Berada di bab "kesimpulan" atau "arahan" | Seluruh teks slide apa adanya, tanpa narasi dan tanpa ringkasan gambar |
+| Memuat blok "Hasil Pembahasan Dewan Gubernur" atau "Key Takeaways" | Blok itu apa adanya di atas gambar, sisa teks tetap dinarasikan |
+| Perlu gambar (chart, diagram, tabel angka, gambar dengan teks pendek) | Tabel dua kolom gambar dan caption: satu baris per panel bila terdeteksi 2 panel atau lebih, atau satu baris untuk slide utuh; narasi paragraf di bawahnya |
+| Tabel hanya berisi teks, atau slide padat teks | Ditulis sebagai teks (paragraf) tanpa gambar |
 
 Bullet dan penomoran hanya muncul pada teks yang dibawa apa adanya dari slide; narasi yang ditulis model selalu paragraf.
 
