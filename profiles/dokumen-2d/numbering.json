@@ -1,0 +1,34 @@
+[
+  {
+    "source": "DKEM RDGB Maret 2026_06_Materi Hari Kedua_afterRDG.html",
+    "awalan": "K",
+    "count": 6,
+    "first": 1,
+    "last": 5,
+    "sequential": false,
+    "duplicates": [
+      2
+    ],
+    "restarts": 0
+  },
+  {
+    "source": "DKEM RDGB Mei 2025_06_Materi Hari Kedua_V1_AfterRDG.html",
+    "awalan": "Grafik",
+    "count": 39,
+    "first": 1,
+    "last": 39,
+    "sequential": true,
+    "duplicates": [],
+    "restarts": 0
+  },
+  {
+    "source": "DKEM RDGB Mei 2025_06_Materi Hari Kedua_V1_AfterRDG.html",
+    "awalan": "Tabel",
+    "count": 5,
+    "first": 1,
+    "last": 5,
+    "sequential": true,
+    "duplicates": [],
+    "restarts": 0
+  }
+]

@@ -1,0 +1,244 @@
+{
+  "pdf": [
+    {
+      "file": "RDGB_Maret 2026_Buku 2d Pokok Pembahasan dan Rancangan Bauran Kebijakan.pdf",
+      "halaman": 51,
+      "ukuran": {
+        "lebar_pt": 595.9,
+        "tinggi_pt": 842.9,
+        "nama": "A4"
+      },
+      "margin_pt": {
+        "kiri": 33.7,
+        "kanan": 33.4,
+        "atas": 61.2,
+        "bawah": 56.7,
+        "indent_isi": 69.1,
+        "metode": "jarak terkecil konten ke tepi halaman; indent_isi = median tepi kiri teks per halaman"
+      },
+      "nomor_halaman": {
+        "halaman_bernomor": 51,
+        "dari_halaman": 51,
+        "mulai": 1,
+        "posisi": {
+          "x0_pt": 546.5,
+          "top_pt": 795.1
+        },
+        "perataan": "kanan",
+        "font": "NotoSans-Regular",
+        "ukuran_pt": 10.5
+      },
+      "footer_berulang": [
+        {
+          "pola": "Approved by * at #/#/# #:#",
+          "halaman": 51,
+          "posisi": {
+            "x0_pt": 40.0,
+            "top_pt": 817.9
+          },
+          "font": "Poppins-Regular",
+          "ukuran_pt": 10.0,
+          "dikecualikan": true,
+          "alasan": "dibubuhkan alur persetujuan, bukan bagian format dokumen"
+        }
+      ],
+      "watermark": {
+        "teks": "RAHASIA",
+        "font": "Poppins-Regular",
+        "ukuran_pt_perkiraan": [
+          59.9,
+          81.4
+        ],
+        "sudut_derajat": 45,
+        "warna": "#808080",
+        "halaman": 51
+      },
+      "tipografi_pdf": {
+        "isi_dominan": {
+          "font": "NotoSans-Regular",
+          "ukuran_pt": 11.0,
+          "bagian": 0.612
+        },
+        "teratas": [
+          {
+            "font": "NotoSans-Regular",
+            "ukuran_pt": 11.0,
+            "bagian": 0.612
+          },
+          {
+            "font": "NotoSans-Regular",
+            "ukuran_pt": 12.0,
+            "bagian": 0.194
+          },
+          {
+            "font": "NotoSans-Bold",
+            "ukuran_pt": 11.0,
+            "bagian": 0.075
+          },
+          {
+            "font": "Frutiger-Light",
+            "ukuran_pt": 10.0,
+            "bagian": 0.053
+          },
+          {
+            "font": "NotoSans-Italic",
+            "ukuran_pt": 11.0,
+            "bagian": 0.031
+          },
+          {
+            "font": "NotoSans-Regular",
+            "ukuran_pt": 9.0,
+            "bagian": 0.013
+          }
+        ]
+      }
+    },
+    {
+      "file": "RDGB_Mei 2025_Buku 2d Bauran Kebijakan BI 2.pdf",
+      "halaman": 21,
+      "ukuran": {
+        "lebar_pt": 595.9,
+        "tinggi_pt": 842.9,
+        "nama": "A4"
+      },
+      "margin_pt": {
+        "kiri": 35.2,
+        "kanan": 34.2,
+        "atas": 58.3,
+        "bawah": 60.3,
+        "indent_isi": 56.1,
+        "metode": "jarak terkecil konten ke tepi halaman; indent_isi = median tepi kiri teks per halaman"
+      },
+      "nomor_halaman": {
+        "halaman_bernomor": 21,
+        "dari_halaman": 21,
+        "mulai": 1,
+        "posisi": {
+          "x0_pt": 546.5,
+          "top_pt": 795.1
+        },
+        "perataan": "kanan",
+        "font": "OpenSans-Regular",
+        "ukuran_pt": 10.5
+      },
+      "footer_berulang": [
+        {
+          "pola": "Approved by * at #/#/# #:#",
+          "halaman": 21,
+          "posisi": {
+            "x0_pt": 40.0,
+            "top_pt": 817.9
+          },
+          "font": "Poppins-Regular",
+          "ukuran_pt": 10.0,
+          "dikecualikan": true,
+          "alasan": "dibubuhkan alur persetujuan, bukan bagian format dokumen"
+        }
+      ],
+      "watermark": {
+        "teks": "RAHASIA",
+        "font": "Poppins-Regular",
+        "ukuran_pt_perkiraan": [
+          59.9,
+          81.4
+        ],
+        "sudut_derajat": 45,
+        "warna": "#808080",
+        "halaman": 21
+      },
+      "tipografi_pdf": {
+        "isi_dominan": {
+          "font": "Frutiger-Light",
+          "ukuran_pt": 7.3,
+          "bagian": 0.791
+        },
+        "teratas": [
+          {
+            "font": "Frutiger-Light",
+            "ukuran_pt": 7.3,
+            "bagian": 0.791
+          },
+          {
+            "font": "Frutiger-Light",
+            "ukuran_pt": 6.0,
+            "bagian": 0.102
+          },
+          {
+            "font": "Frutiger-Light",
+            "ukuran_pt": 8.0,
+            "bagian": 0.097
+          },
+          {
+            "font": "Frutiger-Light",
+            "ukuran_pt": 7.0,
+            "bagian": 0.009
+          },
+          {
+            "font": "Frutiger-Light",
+            "ukuran_pt": 4.5,
+            "bagian": 0.001
+          }
+        ]
+      }
+    }
+  ],
+  "html": [
+    {
+      "file": "DKEM RDGB Maret 2026_06_Materi Hari Kedua_afterRDG.html",
+      "ukuran": [
+        {
+          "pt": 11.0,
+          "bagian": 0.837
+        },
+        {
+          "pt": 10.0,
+          "bagian": 0.134
+        },
+        {
+          "pt": 12.0,
+          "bagian": 0.03
+        }
+      ],
+      "font": [
+        {
+          "nama": "Frutiger 45 Light",
+          "bagian": 1.0
+        }
+      ]
+    },
+    {
+      "file": "DKEM RDGB Mei 2025_06_Materi Hari Kedua_V1_AfterRDG.html",
+      "ukuran": [
+        {
+          "pt": 11.0,
+          "bagian": 1.0
+        }
+      ],
+      "font": [
+        {
+          "nama": "Frutiger 45 Light",
+          "bagian": 1.0
+        }
+      ]
+    }
+  ],
+  "skala_cetak": [
+    {
+      "dokumen": "Maret 2026",
+      "pdf": "RDGB_Maret 2026_Buku 2d Pokok Pembahasan dan Rancangan Bauran Kebijakan.pdf",
+      "html": "DKEM RDGB Maret 2026_06_Materi Hari Kedua_afterRDG.html",
+      "ukuran_html_pt": 11.0,
+      "ukuran_pdf_pt": 11.0,
+      "skala": 1.0
+    },
+    {
+      "dokumen": "Mei 2025",
+      "pdf": "RDGB_Mei 2025_Buku 2d Bauran Kebijakan BI 2.pdf",
+      "html": "DKEM RDGB Mei 2025_06_Materi Hari Kedua_V1_AfterRDG.html",
+      "ukuran_html_pt": 11.0,
+      "ukuran_pdf_pt": 7.3,
+      "skala": 0.66
+    }
+  ],
+  "catatan": "Skala cetak di bawah 1 berarti browser menyusutkan halaman saat mencetak; ukuran font dokumen mengikuti HTML, bukan PDF."
+}

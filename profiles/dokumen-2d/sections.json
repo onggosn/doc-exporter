@@ -1,0 +1,164 @@
+[
+  {
+    "title": "2. Pokok Pembahasan dan Rancangan Kebijakan > 2.1 Pokok Pembahasan dan Rancangan Kebijakan Moneter",
+    "layouts": {
+      "gambar-penuh:cfc688": 1,
+      "gambar-penuh+gambar-kiri-narasi-kanan:a4b37e": 1
+    },
+    "caption": {
+      "counts": {
+        "headline": 23,
+        "kosong": 1
+      },
+      "dominan": "headline",
+      "bernomor": 6
+    }
+  },
+  {
+    "title": "2. Pokok Pembahasan dan Rancangan Kebijakan > 2.2 Pokok Pembahasan dan Rancangan Kebijakan Makroprudensial",
+    "layouts": {
+      "gambar-tunggal:377fb8": 22,
+      "gambar-kiri-narasi-kanan:f954d4": 3
+    },
+    "caption": {
+      "counts": {
+        "kosong": 23,
+        "headline": 2
+      },
+      "dominan": "headline",
+      "bernomor": 0
+    }
+  },
+  {
+    "title": "2. Pokok Pembahasan dan Rancangan Kebijakan > 2.3 Pokok Pembahasan dan Rancangan Kebijakan Sistem Pembayaran",
+    "layouts": {
+      "gambar-penuh:ecdf62": 1,
+      "gambar-kiri-narasi-kanan:ff6bff": 2,
+      "gambar-kiri-narasi-kanan:71f060": 7,
+      "gambar-kiri-narasi-kanan:f954d4": 2,
+      "gambar-kiri-narasi-kanan:c13ea8": 1
+    },
+    "caption": {
+      "counts": {
+        "kosong": 13
+      },
+      "dominan": "kosong",
+      "bernomor": 0
+    }
+  },
+  {
+    "title": "3. Rancangan Bauran Kebijakan Bank Sentral > 3.1 Kebijakan Moneter",
+    "layouts": {
+      "gambar-sebaris:8704d1": 5,
+      "gambar-tunggal:377fb8": 2
+    },
+    "caption": {
+      "counts": {
+        "kosong": 7
+      },
+      "dominan": "kosong",
+      "bernomor": 0
+    }
+  },
+  {
+    "title": "3. Rancangan Bauran Kebijakan Bank Sentral > 3.6 Tema Komunikasi dan Pokok-Pokok Komunikasi Kebijakan",
+    "layouts": {
+      "gambar-tunggal:377fb8": 2
+    },
+    "caption": {
+      "counts": {
+        "kosong": 2
+      },
+      "dominan": "kosong",
+      "bernomor": 0
+    }
+  },
+  {
+    "title": "2. Ringkasan Asesmen Evaluasi dan Rekomendasi Kebijakan > 2.1 Ringkasan Asesmen dan Rekomendasi Kebijakan Moneter",
+    "layouts": {
+      "gambar-tunggal:377fb8": 2,
+      "gambar-penuh+gambar-kiri-narasi-kanan:7871e6": 1
+    },
+    "caption": {
+      "counts": {
+        "kosong": 2,
+        "headline": 7,
+        "label_topik": 1
+      },
+      "dominan": "headline",
+      "bernomor": 0
+    }
+  },
+  {
+    "title": "2. Ringkasan Asesmen Evaluasi dan Rekomendasi Kebijakan > 2.2 Ringkasan Asesmen dan Rekomendasi Kebijakan Makroprudensial",
+    "layouts": {
+      "banner+gambar-penuh+gambar-kiri-narasi-kanan:31f9c4": 1,
+      "gambar-berdampingan:34ab24": 1,
+      "gambar-penuh+gambar-berdampingan+gambar-saja:dd1d1c": 1
+    },
+    "caption": {
+      "counts": {
+        "kosong": 17,
+        "headline": 2,
+        "label_topik": 1,
+        "label_bernomor": 44
+      },
+      "dominan": "label_bernomor",
+      "bernomor": 44
+    }
+  },
+  {
+    "title": "2. Ringkasan Asesmen Evaluasi dan Rekomendasi Kebijakan > 2.3 Ringkasan Asesmen dan Rekomendasi Kebijakan SP",
+    "layouts": {
+      "gambar-tunggal:377fb8": 1,
+      "gambar-kiri-narasi-kanan:f954d4": 6
+    },
+    "caption": {
+      "counts": {
+        "kosong": 6,
+        "headline": 1
+      },
+      "dominan": "headline",
+      "bernomor": 0
+    }
+  },
+  {
+    "title": "3. Proyeksi",
+    "layouts": {
+      "gambar-tunggal:377fb8": 5
+    },
+    "caption": {
+      "counts": {
+        "kosong": 5
+      },
+      "dominan": "kosong",
+      "bernomor": 0
+    }
+  },
+  {
+    "title": "4. Butir Rekomendasi Bauran Kebijakan > 4.1 Kebijakan Moneter",
+    "layouts": {
+      "gambar-tunggal:377fb8": 5
+    },
+    "caption": {
+      "counts": {
+        "kosong": 5
+      },
+      "dominan": "kosong",
+      "bernomor": 0
+    }
+  },
+  {
+    "title": "4. Butir Rekomendasi Bauran Kebijakan > 4.6 Rekomendasi Tema Komunikasi Utama",
+    "layouts": {
+      "gambar-sebaris:8704d1": 2
+    },
+    "caption": {
+      "counts": {
+        "kosong": 2
+      },
+      "dominan": "kosong",
+      "bernomor": 0
+    }
+  }
+]

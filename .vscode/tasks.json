@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run PPT ke Dokumen",
+			"type": "shell",
+			"command": "HOST=127.0.0.1 PORT=5003 .venv/bin/python app.py",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

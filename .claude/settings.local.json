@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pkill -f \"app.py\")",
+      "Bash(HOST=127.0.0.1 PORT=5003 MAX_UPLOAD_MB=1000 python3 app.py)",
+      "Read(//private/tmp/**)",
+      "Bash(lsof -nP -iTCP:5003 -sTCP:LISTEN)",
+      "Bash(.venv/bin/python -m unittest tests.test_profile_routes tests.test_profile_store tests.test_profile_builder)",
+      "Bash(curl -s localhost:5004/api/profiles/dokumen-2d)",
+      "Bash(.venv/bin/python -c \"import json,sys;d=json.load\\(sys.stdin\\);print\\('saved:',d['settings_saved'],'| awalan pertama:',d['settings']['penomoran'][0]['awalan']\\)\")",
+      "Bash(curl -s -X DELETE localhost:5004/api/profiles/dokumen-2d/settings)",
+      "Bash(pkill -f \"PORT=5004\")",
+      "Bash(xargs -r kill)",
+      "Bash(.venv/bin/python -m unittest discover -s tests)",
+      "Bash(.venv/bin/python -)",
+      "Bash(grep -n 'return {$' profile_builder.py)",
+      "Bash(.venv/bin/python profile_builder.py referensi/*.html --pdf referensi/*.pdf --name dokumen-2d --title \"Dokumen 2d\")",
+      "Bash(grep -v \"^ \\\\{1,4\\\\}[0-9]\")",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(.venv/bin/python -m unittest tests.test_pdf_profile)",
+      "Bash(.venv/bin/python -m unittest tests.test_profile_builder tests.test_profile_store tests.test_profile_routes tests.test_pdf_profile)",
+      "Bash(.venv/bin/python -c \"import bedrock_service; print\\('import ok'\\)\")",
+      "Bash(.venv/bin/python -m unittest tests.test_bedrock_service)"
+    ]
+  }
+}

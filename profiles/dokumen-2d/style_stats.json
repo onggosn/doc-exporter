@@ -1,0 +1,178 @@
+{
+  "blok": {
+    "paragraf": 130,
+    "poin": 414,
+    "caption": 81
+  },
+  "kalimat": {
+    "paragraf": {
+      "jumlah": 377,
+      "rata_kata": 16.0,
+      "median_kata": 15
+    },
+    "poin": {
+      "jumlah": 578,
+      "rata_kata": 20.8,
+      "median_kata": 19.0
+    }
+  },
+  "singkatan": [
+    {
+      "lengkap": "dengan",
+      "singkatan": {
+        "dg": 26,
+        "dgn": 7
+      },
+      "jumlah_singkat": 33,
+      "jumlah_lengkap": 260
+    },
+    {
+      "lengkap": "yang",
+      "singkatan": {
+        "yg": 26
+      },
+      "jumlah_singkat": 26,
+      "jumlah_lengkap": 356
+    },
+    {
+      "lengkap": "sehingga",
+      "singkatan": {
+        "shg": 13
+      },
+      "jumlah_singkat": 13,
+      "jumlah_lengkap": 26
+    },
+    {
+      "lengkap": "karena",
+      "singkatan": {
+        "krn": 6
+      },
+      "jumlah_singkat": 6,
+      "jumlah_lengkap": 12
+    },
+    {
+      "lengkap": "dalam",
+      "singkatan": {
+        "dlm": 5
+      },
+      "jumlah_singkat": 5,
+      "jumlah_lengkap": 146
+    },
+    {
+      "lengkap": "untuk",
+      "singkatan": {
+        "utk": 3
+      },
+      "jumlah_singkat": 3,
+      "jumlah_lengkap": 211
+    },
+    {
+      "lengkap": "juga",
+      "singkatan": {
+        "jg": 3
+      },
+      "jumlah_singkat": 3,
+      "jumlah_lengkap": 45
+    },
+    {
+      "lengkap": "tersebut",
+      "singkatan": {
+        "tsb": 2
+      },
+      "jumlah_singkat": 2,
+      "jumlah_lengkap": 15
+    },
+    {
+      "lengkap": "secara",
+      "singkatan": {
+        "scr": 1
+      },
+      "jumlah_singkat": 1,
+      "jumlah_lengkap": 34
+    },
+    {
+      "lengkap": "terhadap",
+      "singkatan": {
+        "thd": 1
+      },
+      "jumlah_singkat": 1,
+      "jumlah_lengkap": 38
+    },
+    {
+      "lengkap": "dapat",
+      "singkatan": {
+        "dpt": 1
+      },
+      "jumlah_singkat": 1,
+      "jumlah_lengkap": 52
+    },
+    {
+      "lengkap": "menjadi",
+      "singkatan": {
+        "mjd": 1
+      },
+      "jumlah_singkat": 1,
+      "jumlah_lengkap": 60
+    },
+    {
+      "lengkap": "tidak",
+      "singkatan": {
+        "tdk": 0
+      },
+      "jumlah_singkat": 0,
+      "jumlah_lengkap": 18
+    },
+    {
+      "lengkap": "sebagai",
+      "singkatan": {
+        "sbg": 0
+      },
+      "jumlah_singkat": 0,
+      "jumlah_lengkap": 46
+    },
+    {
+      "lengkap": "seperti",
+      "singkatan": {
+        "spt": 0
+      },
+      "jumlah_singkat": 0,
+      "jumlah_lengkap": 20
+    },
+    {
+      "lengkap": "harus",
+      "singkatan": {
+        "hrs": 0
+      },
+      "jumlah_singkat": 0,
+      "jumlah_lengkap": 4
+    }
+  ],
+  "angka": {
+    "desimal_koma": 158,
+    "desimal_titik": 17,
+    "persen_rapat": 194,
+    "persen_spasi": 8,
+    "rupiah_rapat": 59,
+    "rupiah_spasi": 0
+  },
+  "istilah_teknis": {
+    "bps": 30,
+    "ppt": 2,
+    "yoy": 30
+  },
+  "miring": {
+    "jumlah": 475,
+    "teratas": [
+      "funding",
+      "Growth Driver",
+      "demand",
+      "yield",
+      "baseline",
+      "supply",
+      "appetite",
+      "pricing",
+      "Growth",
+      "special rate"
+    ]
+  }
+}

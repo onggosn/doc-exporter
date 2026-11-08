@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "title": "Dokumen 2d",
+  "created_at": "2026-11-02T16:35:03+00:00",
+  "sources": [
+    {
+      "file": "DKEM RDGB Maret 2026_06_Materi Hari Kedua_afterRDG.html",
+      "sha256": "84e0bf2bf21107ec5f47bba5eda8e108613f0a13d5955f2c81417e7f937cf36e",
+      "images_in_html": 78,
+      "images_in_layouts": 78
+    },
+    {
+      "file": "DKEM RDGB Mei 2025_06_Materi Hari Kedua_V1_AfterRDG.html",
+      "sha256": "f15a9bfd9a142b345f67539d900a7600e16c431e9fd374da6fd7e93965bdf10b",
+      "images_in_html": 94,
+      "images_in_layouts": 94
+    }
+  ],
+  "pdf_sources": [
+    {
+      "file": "RDGB_Maret 2026_Buku 2d Pokok Pembahasan dan Rancangan Bauran Kebijakan.pdf",
+      "sha256": "e7f016a638dd607245f185eaedc570d393d879af3d096249d04bb4b4a31264b6"
+    },
+    {
+      "file": "RDGB_Mei 2025_Buku 2d Bauran Kebijakan BI 2.pdf",
+      "sha256": "9fad6fcfbd2cb11164d4271ee005a75d3582d9704718a64da13dcccc0576453d"
+    }
+  ]
+}

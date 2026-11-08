@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PPT ke Dokumen</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://cdn.ckeditor.com/ckeditor5/41.4.2/classic/ckeditor.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <nav class="sidebar">
+      <p class="eyebrow">PPT → DOKUMEN</p>
+      <button type="button" class="nav-item active" id="nav-whole-document" data-view="whole-document">Whole Document</button>
+      <button type="button" class="nav-item" id="nav-part-document" data-view="part-document">Part Document</button>
+      <button type="button" class="nav-item" id="nav-kb-correction" data-view="kb-correction">KB Correction</button>
+      <button type="button" class="nav-item" id="nav-docx-convert" data-view="docx-convert">PPT → DOCX</button>
+    </nav>
+
+  <main class="layout" id="view-whole-document">
+    <header>
+      <p class="eyebrow">PPT → DOKUMEN</p>
+      <h1>Ubah presentasi menjadi dokumen</h1>
+      <p class="intro">Ekstrak materi slide, buat dokumen per bab dengan Bedrock, lalu tinjau dan edit HTML-nya.</p>
+    </header>
+
+    <form id="generate-form">
+      <section class="panel">
+        <h2>1. Materi dan struktur</h2>
+        <label class="field">
+          <span>Presentasi (.pptx)</span>
+          <input name="presentation" type="file" accept=".pptx" required>
+          <small>Maksimal {{ max_upload_mb }} MB. Gambar dan chart dianalisis jika LibreOffice dan Poppler tersedia.</small>
+        </label>
+        <label class="field">
+          <span>Struktur bab (satu judul per baris)</span>
+          <textarea name="chapters" rows="18" required>1. Kesimpulan Diskusi Hari 1 dan Arahan ADG
+1.1 Kesimpulan dan Arahan Moneter
+1.2 Kesimpulan dan Arahan Makroprudensial
+1.3 Kesimpulan dan Arahan SP
+2 Ringkasan Asesmen Evaluasi dan Rekomendasi Kebijakan
+2.1 Ringkasan Asesmen dan Rekomendasi Kebijakan Moneter
+2.2 Ringkasan Asesmen dan Rekomendasi Kebijakan Makroprudensial
+2.3 Ringkasan Asesmen dan Rekomendasi Kebijakan SP
+3. Proyeksi
+4. Butir Keputusan
+4.1 Kebijakan Moneter
+4.2 Kebijakan Makroprudensial
+4.3 Kebijakan Sistem Pembayaran
+4.4 Kebijakan Pendukung
+4.5 Koordinasi Kebijakan
+4.6 Rekomendasi Tema Komunikasi Data
+4.7 Pokok-Pokok Komunikasi Kebijakan</textarea>
+        </label>
+        <fieldset class="field">
+          <legend>Mode pemetaan slide ke bab</legend>
+          <label class="radio">
+            <input type="radio" name="mapping_mode" value="batch" checked>
+            <span>Sekaligus semua — lebih cepat, risiko slide hilang/dobel pada dek besar</span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="mapping_mode" value="per_slide">
+            <span>Per slide — lebih lambat (1 panggilan per slide), tapi tidak ada slide yang hilang atau dobel</span>
+          </label>
+        </fieldset>
+      </section>
+
+      <section class="panel">
+        <h2>2. Contoh gaya (opsional)</h2>
+        <p class="help">Tambahkan maksimal dua pasangan presentasi dan dokumen final. Dokumen final harus berupa teks UTF-8, misalnya .html atau .txt.</p>
+        <div id="references"></div>
+        <button type="button" class="button secondary" id="add-reference">Tambah pasangan contoh</button>
+      </section>
+
+      <section class="panel">
+        <h2>3. AWS Bedrock</h2>
+        <div class="grid">
+          <label class="field">
+            <span>Model ID</span>
+            <input name="model_id" value="{{ model_id }}" required>
+          </label>
+          <label class="field">
+            <span>Model ID hemat (opsional)</span>
+            <input name="fast_model_id" value="{{ fast_model_id }}" placeholder="Default: sama dengan Model ID di atas">
+          </label>
+          <label class="field">
+            <span>Region AWS (opsional)</span>
+            <input name="region" value="{{ region }}" placeholder="Contoh: ap-southeast-2">
+          </label>
+          <label class="field">
+            <span>Knowledge Base ID (opsional)</span>
+            <input name="knowledge_base_id" value="{{ knowledge_base_id }}" placeholder="Aktifkan retrieval contoh relevan">
+          </label>
+        </div>
+        <small>Gunakan region tempat model tersedia. Jika kolom ini kosong, aplikasi menggunakan region AWS profile. Jika ID Knowledge Base diisi, aplikasi mengambil tiga hasil paling relevan. "Model ID hemat" dipakai untuk deskripsi visual slide dan klasifikasi bab mode <strong>per slide</strong> — isi dengan model lebih murah (mis. Claude Haiku) untuk menghemat biaya. Mode pemetaan <strong>batch</strong> (sekaligus semua) dan penulisan isi bab tetap memakai Model ID utama di atas karena butuh akurasi lebih tinggi. Kredensial dibaca dari AWS SDK default credential chain (environment, profile, atau IAM role).</small>
+      </section>
+      <button class="button primary" type="submit" id="generate-button">Buat dokumen</button>
+    </form>
+
+    <section class="panel" id="generate-progress-panel" hidden>
+      <div class="progress-heading">
+        <h2>Proses pembuatan dokumen</h2>
+        <span class="progress-meta">
+          <span id="generate-elapsed-time" class="elapsed-time">0s</span>
+          <span id="generate-progress-percent" class="progress-percent">0%</span>
+        </span>
+      </div>
+      <div class="progress-bar"><div class="progress-bar-fill" id="generate-progress-fill"></div></div>
+      <ol id="generate-step-list" class="step-list"></ol>
+    </section>
+
+    <section class="panel" id="per-slide-panel" hidden>
+      <h2>Klasifikasi slide per bab</h2>
+      <ol id="bab-list"></ol>
+      <p id="slide-progress" class="help"></p>
+      <ol id="slide-list" class="slide-list"></ol>
+      <div class="actions">
+        <button type="button" class="button primary" id="finalize-button" hidden>Buat dokumen</button>
+      </div>
+    </section>
+
+    <section class="panel results" id="results" hidden>
+      <div class="result-heading">
+        <div>
+          <h2>Hasil untuk tinjauan</h2>
+          <p id="result-source" class="help"></p>
+          <p id="result-elapsed" class="help"></p>
+        </div>
+        <button type="button" class="button secondary" id="download-html">Unduh HTML</button>
+      </div>
+      <div id="chapter-tabs" class="tabs" role="tablist"></div>
+      <div id="editor"></div>
+      <p class="help">Konten di editor dapat diubah sebelum diunduh atau disalin ke CKEditor.</p>
+    </section>
+    <div id="status" role="status" aria-live="polite"></div>
+  </main>
+
+  <main class="layout" id="view-part-document" hidden>
+    <header>
+      <p class="eyebrow">PPT → DOKUMEN</p>
+      <h1>Koreksi sebagian dokumen</h1>
+      <p class="intro">Buat dokumen dari presentasi, lalu seleksi bagian yang ingin dikoreksi — sistem memperbaikinya berdasarkan materi slide asli dan contoh referensi.</p>
+    </header>
+
+    <form id="part-generate-form">
+      <section class="panel">
+        <h2>1. Materi dan struktur</h2>
+        <label class="field">
+          <span>Presentasi (.pptx)</span>
+          <input name="presentation" type="file" accept=".pptx" required>
+          <small>Maksimal {{ max_upload_mb }} MB. Gambar dan chart dianalisis jika LibreOffice dan Poppler tersedia.</small>
+        </label>
+        <label class="field">
+          <span>Struktur bab (satu judul per baris)</span>
+          <textarea name="chapters" rows="18" required>1. Kesimpulan Diskusi Hari 1 dan Arahan ADG
+1.1 Kesimpulan dan Arahan Moneter
+1.2 Kesimpulan dan Arahan Makroprudensial
+1.3 Kesimpulan dan Arahan SP
+2 Ringkasan Asesmen Evaluasi dan Rekomendasi Kebijakan
+2.1 Ringkasan Asesmen dan Rekomendasi Kebijakan Moneter
+2.2 Ringkasan Asesmen dan Rekomendasi Kebijakan Makroprudensial
+2.3 Ringkasan Asesmen dan Rekomendasi Kebijakan SP
+3. Proyeksi
+4. Butir Keputusan
+4.1 Kebijakan Moneter
+4.2 Kebijakan Makroprudensial
+4.3 Kebijakan Sistem Pembayaran
+4.4 Kebijakan Pendukung
+4.5 Koordinasi Kebijakan
+4.6 Rekomendasi Tema Komunikasi Data
+4.7 Pokok-Pokok Komunikasi Kebijakan</textarea>
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>2. Contoh gaya (opsional)</h2>
+        <p class="help">Tambahkan maksimal dua pasangan presentasi dan dokumen final. Dokumen final harus berupa teks UTF-8, misalnya .html atau .txt.</p>
+        <div id="part-references"></div>
+        <button type="button" class="button secondary" id="part-add-reference">Tambah pasangan contoh</button>
+      </section>
+
+      <section class="panel">
+        <h2>3. AWS Bedrock</h2>
+        <div class="grid">
+          <label class="field">
+            <span>Model ID</span>
+            <input name="model_id" value="{{ model_id }}" required>
+          </label>
+          <label class="field">
+            <span>Region AWS (opsional)</span>
+            <input name="region" value="{{ region }}" placeholder="Contoh: ap-southeast-2">
+          </label>
+          <label class="field">
+            <span>Knowledge Base ID (opsional)</span>
+            <input name="knowledge_base_id" value="{{ knowledge_base_id }}" placeholder="Aktifkan retrieval contoh relevan">
+          </label>
+        </div>
+        <small>Dipakai juga sebagai sumber koreksi (fakta dari slide + gaya dari referensi/KB).</small>
+      </section>
+      <button class="button primary" type="submit" id="part-generate-button">Buat dokumen</button>
+    </form>
+
+    <section class="panel" id="part-generate-progress-panel" hidden>
+      <div class="progress-heading">
+        <h2>Proses pembuatan dokumen</h2>
+        <span class="progress-meta">
+          <span id="part-generate-elapsed-time" class="elapsed-time">0s</span>
+          <span id="part-generate-progress-percent" class="progress-percent">0%</span>
+        </span>
+      </div>
+      <div class="progress-bar"><div class="progress-bar-fill" id="part-generate-progress-fill"></div></div>
+      <ol id="part-generate-step-list" class="step-list"></ol>
+    </section>
+
+    <section class="panel results" id="part-results" hidden>
+      <div class="result-heading">
+        <div>
+          <h2>Hasil untuk tinjauan</h2>
+          <p id="part-result-source" class="help"></p>
+          <p id="part-result-elapsed" class="help"></p>
+        </div>
+        <button type="button" class="button secondary" id="part-download-html">Unduh HTML</button>
+      </div>
+      <div id="part-chapter-tabs" class="tabs" role="tablist"></div>
+      <div id="part-editor"></div>
+      <div class="actions">
+        <button type="button" class="button primary" id="correct-selection-button">Koreksi seleksi</button>
+      </div>
+      <p class="help">Seleksi (highlight) bagian yang ingin diperbaiki di editor, lalu klik "Koreksi seleksi". Sistem mengecek fakta ke materi slide asli dan menyelaraskan gaya ke referensi.</p>
+    </section>
+    <div id="part-status" role="status" aria-live="polite"></div>
+  </main>
+
+  <main class="layout" id="view-kb-correction" hidden>
+    <header>
+      <p class="eyebrow">PPT → DOKUMEN</p>
+      <h1>Koreksi HTML dari Knowledge Base</h1>
+      <p class="intro">Tulis atau tempel potongan konten di editor, sistem mencari materi PPT relevan di Knowledge Base lalu mengoreksi fakta dan gaya penulisannya.</p>
+    </header>
+
+    <form id="kb-correction-form">
+      <section class="panel">
+        <h2>1. Potongan konten</h2>
+        <div class="field">
+          <span>Konten yang ingin dikoreksi</span>
+          <div id="kb-correction-input-editor"></div>
+          <small>Potongan konten (misal satu bab/sub-bab), bukan dokumen HTML lengkap dengan html/head/body. Bisa sisipkan gambar — isinya akan dibaca model untuk membantu menyusun/mengoreksi narasi.</small>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>2. AWS Bedrock</h2>
+        <div class="grid">
+          <label class="field">
+            <span>Model ID</span>
+            <input name="model_id" value="{{ model_id }}" required>
+          </label>
+          <label class="field">
+            <span>Region AWS (opsional)</span>
+            <input name="region" value="{{ region }}" placeholder="Contoh: ap-southeast-2">
+          </label>
+          <label class="field">
+            <span>Knowledge Base ID</span>
+            <input name="knowledge_base_id" value="{{ knowledge_base_id }}" placeholder="Wajib diisi — sumber materi koreksi" required>
+          </label>
+        </div>
+        <small>Sistem mencari materi PPT paling relevan di Knowledge Base ini berdasarkan isi HTML yang diupload, lalu memakainya untuk koreksi fakta dan gaya.</small>
+      </section>
+      <button class="button primary" type="submit" id="kb-correction-button">Koreksi</button>
+    </form>
+
+    <section class="panel" id="kb-correction-changes-panel" hidden>
+      <h2>Poin perubahan</h2>
+      <ol id="kb-correction-changes-list" class="changes-list"></ol>
+      <p id="kb-correction-no-changes" class="help" hidden>Tidak ada perubahan — HTML sudah sesuai materi KB.</p>
+    </section>
+
+    <section class="panel results" id="kb-correction-results" hidden>
+      <div class="result-heading">
+        <div>
+          <h2>Hasil koreksi</h2>
+        </div>
+        <button type="button" class="button secondary" id="kb-correction-download">Unduh HTML</button>
+      </div>
+      <div id="kb-correction-editor"></div>
+      <p class="help">Konten di editor dapat diubah sebelum diunduh.</p>
+    </section>
+    <div id="kb-correction-status" role="status" aria-live="polite"></div>
+  </main>
+
+  <main class="layout wide" id="view-docx-convert" hidden>
+    <header>
+      <p class="eyebrow">PPT → DOCX</p>
+      <h1>Ubah PPT menjadi DOCX</h1>
+      <p class="intro">Fakta berasal dari PPT yang diunggah; format, gaya, susunan gambar, dan caption mengikuti profil jenis dokumen. Pilih profil, unggah PPT, lalu tinjau dan atur profilnya di bawah.</p>
+    </header>
+
+    <section class="panel">
+      <h2>1. Jenis dokumen</h2>
+      <label class="field">
+        <span>Profil</span>
+        <select id="docx-profile-select" disabled></select>
+      </label>
+      <p class="help" id="docx-profile-summary"></p>
+    </section>
+
+    <form id="docx-create-form" class="panel">
+      <h2>2. Buat DOCX dari PPT</h2>
+      <label class="field">
+        <span>Presentasi (.pptx)</span>
+        <input type="file" name="presentation" accept=".pptx" required>
+      </label>
+      <label class="field">
+        <span>Struktur bab (satu judul per baris)</span>
+        <textarea name="chapters" rows="18" required placeholder="Contoh:&#10;Ringkasan Asesmen&#10;Rekomendasi Kebijakan">{{ docx_default_chapters }}</textarea>
+        <small>Judul bab dicocokkan dengan kata kunci aturan penomoran di profil (panel Penomoran caption).</small>
+      </label>
+      <div class="grid">
+        <label class="field">
+          <span>Model ID</span>
+          <input name="model_id" value="{{ model_id }}">
+        </label>
+        <label class="field">
+          <span>Region AWS (opsional)</span>
+          <input name="region" value="{{ region }}" placeholder="Contoh: ap-southeast-2">
+        </label>
+      </div>
+      <label class="field">
+        <span>Pemetaan slide ke bab</span>
+        <select name="mapping_mode">
+          <option value="batch">Sekaligus (lebih cepat)</option>
+          <option value="per_slide">Satu per satu (lebih teliti)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Worker paralel</span>
+        <select name="workers">
+          <option value="1">1 (berurutan)</option>
+          <option value="2">2</option>
+          <option value="4" selected>4 (disarankan)</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select>
+        <small>Jumlah panggilan Bedrock yang dijalankan bersamaan untuk deskripsi visual, pemetaan per slide, dan narasi bab. Lebih banyak worker lebih cepat tetapi lebih mudah terkena throttling; Bedrock otomatis memperlambat dan mengulang bila itu terjadi.</small>
+      </label>
+      <label class="field">
+        <span>Slide bergambar</span>
+        <select name="split_panels">
+          <option value="ya">Pecah menjadi panel, tiap panel bercaption dari judulnya</option>
+          <option value="tidak">Satu gambar utuh per slide</option>
+        </select>
+        <small>Pemecahan memakai posisi chart, tabel, dan gambar di slide serta judul panelnya. Slide yang tidak bisa dipecah dengan yakin tetap satu gambar utuh.</small>
+      </label>
+      <p class="notice">Teks dan gambar slide akan dikirim ke Amazon Bedrock. Slide bergambar, chart, diagram, dan tabel dijadikan gambar di dokumen. Pastikan presentasi boleh dikirim ke layanan model.</p>
+      <div class="actions">
+        <button class="button primary" type="submit" id="docx-create-button" disabled>Buat DOCX</button>
+      </div>
+    </form>
+
+    <section class="panel" id="docx-progress-panel" hidden>
+      <div class="progress-heading">
+        <h2>Proses pembuatan DOCX</h2>
+        <span class="progress-meta">
+          <span id="docx-elapsed" class="elapsed-time">0s</span>
+          <span id="docx-percent" class="progress-percent">0%</span>
+        </span>
+      </div>
+      <div class="progress-bar"><div class="progress-bar-fill" id="docx-progress-fill"></div></div>
+      <ol id="docx-step-list" class="step-list"></ol>
+    </section>
+
+    <section class="panel" id="docx-result-panel" hidden>
+      <div class="result-heading">
+        <div>
+          <h2>Hasil</h2>
+          <p class="help" id="docx-result-summary"></p>
+        </div>
+        <a class="button primary" id="docx-download" href="#">Unduh DOCX</a>
+      </div>
+      <h3>Verifikasi</h3>
+      <ul class="plain-list" id="docx-report"></ul>
+      <p class="help">Font Frutiger 45 Light harus terpasang di komputer pembuka agar tampilannya sama; bila tidak, Word memakai font pengganti. Watermark belum dipasang.</p>
+    </section>
+
+    <div id="docx-profile-body" hidden>
+      <section class="panel">
+        <h2>3. Pustaka layout</h2>
+        <p class="help">Pola tabel dan gambar yang ditemukan di dokumen referensi, dari yang paling sering dipakai.</p>
+        <div class="table-scroll">
+          <table class="data-table" id="docx-layout-table">
+            <thead><tr><th>Layout</th><th>Dipakai</th><th>Kolom</th><th>Caption</th><th>Bernomor</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>4. Pola baris bergambar</h2>
+        <p class="help">Satuan terkecil yang dipilih per slide. <code>I</code> gambar, <code>T</code> teks, <code>E</code> kosong, <code>*n</code> menggabung n kolom, <code>s</code> sel berwarna.</p>
+        <div class="table-scroll">
+          <table class="data-table" id="docx-pattern-table">
+            <thead><tr><th>Pola</th><th>Peran</th><th>Baris</th><th>Tabel</th><th>Lebar kolom</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>5. Properti halaman</h2>
+        <p class="help" id="docx-page-help">Diukur dari PDF referensi. Ukuran font tidak diambil dari PDF karena hasil cetak browser bisa terskala; ukuran font mengikuti HTML.</p>
+        <div class="table-scroll" id="docx-page-table-wrap">
+          <table class="data-table" id="docx-page-table">
+            <thead><tr><th>PDF referensi</th><th>Kertas</th><th>Margin (pt)</th><th>Nomor halaman</th><th>Watermark</th><th>Skala cetak</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h3>Tidak ditiru</h3>
+        <ul class="plain-list" id="docx-page-excluded"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>6. Penomoran caption</h2>
+        <p class="help">Yang dipentingkan adalah adanya penomoran, bukan awalan tertentu. Atur awalan, nomor awal, dan apakah nomor berlanjut antarbagian atau mulai ulang di tiap bagian. Aturan dipakai pada bagian yang judulnya memuat kata kunci.</p>
+
+        <h3>Ditemukan di referensi</h3>
+        <div class="table-scroll">
+          <table class="data-table" id="docx-evidence-table">
+            <thead><tr><th>Bagian</th><th>Awalan</th><th>Jumlah</th><th>Rentang</th><th>Contoh</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="help" id="docx-evidence-empty" hidden>Tidak ada caption bernomor di referensi.</p>
+
+        <h3>Aturan untuk dokumen baru</h3>
+        <div id="docx-rules" class="rule-list"></div>
+        <label class="field">
+          <span>Caption bila bab tidak punya aturan penomoran</span>
+          <select id="docx-caption-default">
+            <option value="headline">Judul slide sebagai caption (tanpa nomor)</option>
+            <option value="kosong">Tanpa caption</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button type="button" class="button secondary" id="docx-rule-add">Tambah aturan</button>
+          <button type="button" class="button primary" id="docx-settings-save">Simpan</button>
+          <button type="button" class="button secondary" id="docx-settings-reset">Kembalikan dari referensi</button>
+        </div>
+        <p class="help" id="docx-settings-state"></p>
+      </section>
+
+      <section class="panel">
+        <h2>7. Gaya bahasa</h2>
+        <p class="help">Statistik di bawah dihitung langsung dari teks referensi. Panduan gaya adalah rangkuman model atas statistik dan sampel itu; kutipan contohnya diperiksa harus ada persis di sampel.</p>
+        <h3>Terukur dari referensi</h3>
+        <div class="table-scroll">
+          <table class="data-table" id="docx-style-stats">
+            <thead><tr><th>Aspek</th><th>Hasil</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="help" id="docx-style-stats-empty" hidden>Profil ini belum memiliki statistik gaya. Bangun ulang dengan profile_builder.py.</p>
+
+        <h3>Panduan gaya</h3>
+        <p class="notice" id="docx-style-stale" hidden>Panduan ini dibuat dari sampel yang sekarang sudah berbeda. Buat ulang agar sesuai profil.</p>
+        <p class="help" id="docx-style-empty">Panduan belum dibuat.</p>
+        <div id="docx-style-guide" hidden>
+          <p class="help" id="docx-style-guide-meta"></p>
+          <div class="table-scroll">
+            <table class="data-table" id="docx-style-guide-table"><tbody></tbody></table>
+          </div>
+          <h3>Larangan</h3>
+          <ul class="plain-list" id="docx-style-prohibitions"></ul>
+          <h3>Contoh kutipan</h3>
+          <ul class="plain-list" id="docx-style-examples"></ul>
+        </div>
+
+        <h3>Buat panduan gaya</h3>
+        <div class="grid">
+          <label class="field">
+            <span>Model ID</span>
+            <input id="docx-style-model" value="{{ model_id }}">
+          </label>
+          <label class="field">
+            <span>Region AWS (opsional)</span>
+            <input id="docx-style-region" value="{{ region }}" placeholder="Contoh: ap-southeast-2">
+          </label>
+        </div>
+        <p class="notice" id="docx-style-warning">Sampel teks referensi akan dikirim ke Amazon Bedrock. Pastikan dokumen referensi boleh dikirim ke layanan model.</p>
+        <div class="actions">
+          <button type="button" class="button primary" id="docx-style-button">Buat panduan gaya</button>
+        </div>
+      </section>
+    </div>
+    <div id="docx-status" role="status" aria-live="polite"></div>
+  </main>
+  </div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ url_for('static', filename='part-document.js') }}"></script>
+  <script src="{{ url_for('static', filename='kb-correction.js') }}"></script>
+  <script src="{{ url_for('static', filename='docx-convert.js') }}"></script>
+  <script src="{{ url_for('static', filename='nav.js') }}"></script>
+</body>
+</html>
