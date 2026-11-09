@@ -37,7 +37,8 @@ MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "1000"))
 DEFAULT_KNOWLEDGE_BASE_ID = "2R7PFHPUO6"
 DEFAULT_FAST_MODEL_ID = "moonshotai.kimi-k2.5"
 MAPPING_SESSION_TTL_SECONDS = 3600
-LOG_FILE = BASE_DIR / "proses.log"
+LOG_FILE = Path(os.environ.get("LOG_FILE", BASE_DIR / "proses.log"))
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 _file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
 _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))

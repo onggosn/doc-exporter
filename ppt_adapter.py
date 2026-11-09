@@ -174,8 +174,12 @@ def render_slides_png(pptx_path: Path, out_dir: Path, dpi: int = 110) -> dict[in
 
     out_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
+        # Profil LibreOffice per-konversi di direktori temp: aman untuk container
+        # non-root (OpenShift) dan mencegah konflik lock antar konversi paralel.
+        profile_dir = Path(tmp) / "lo_profile"
         subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf", "--outdir", tmp, str(pptx_path)],
+            [soffice, f"-env:UserInstallation={profile_dir.as_uri()}",
+             "--headless", "--convert-to", "pdf", "--outdir", tmp, str(pptx_path)],
             check=True, capture_output=True, timeout=300,
         )
         pdf = Path(tmp) / (pptx_path.stem + ".pdf")

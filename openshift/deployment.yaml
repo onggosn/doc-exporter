@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deterministik
+spec:
+  replicas: 1            # harus 1: sesi mapping/job disimpan di memori proses
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: deterministik}
+  template:
+    metadata:
+      labels: {app: deterministik}
+    spec:
+      containers:
+        - name: app
+          image: image-registry.openshift-image-registry.svc:5000/NAMESPACE/deterministik:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef: {name: deterministik-env}   # isi dari .env (AWS, PG*, dst.)
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {cpu: "2", memory: 3Gi}          # LibreOffice butuh ~0,5-1 GB per konversi
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deterministik
+spec:
+  selector: {app: deterministik}
+  ports:
+    - {port: 8080, targetPort: 8080}
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: deterministik
+  annotations:
+    haproxy.router.openshift.io/timeout: 900s   # unggahan dan proses panjang
+spec:
+  to: {kind: Service, name: deterministik}
+  port: {targetPort: 8080}
+  tls: {termination: edge}
