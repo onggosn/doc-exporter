@@ -195,6 +195,44 @@ Aturan yang dipakai pada langkah penyusunan (6) untuk tiap slide:
 
 Bullet dan penomoran hanya muncul pada teks yang dibawa apa adanya dari slide; narasi yang ditulis model selalu paragraf.
 
+### API konversi PPTX ke DOCX
+
+Semua fungsi konversi bisa dipakai tanpa antarmuka web. Kontrak lengkap (OpenAPI 3) ada di `GET /api/docx/openapi.json`. Untuk mencoba langsung dari browser, buka Swagger UI di `/api/docx/docs` (memuat aset dari cdnjs, jadi butuh akses internet di browser). Tidak ada autentikasi, jadi jalankan hanya di jaringan lokal yang tepercaya. Pembuatan berjalan di latar belakang dan bisa memakan beberapa menit, jadi alurnya unggah, pantau, lalu unduh.
+
+| Endpoint | Fungsi |
+|---|---|
+| `GET /api/docx/options` | Nilai bawaan dan batas: profil, mode pemetaan, worker, model, batas unggah, daftar langkah |
+| `POST /api/docx/start` | Unggah PPTX dan mulai konversi. Mengembalikan `session_id` |
+| `GET /api/docx/status/<id>` | Status (`running`, `done`, `error`, `cancelled`), progres tiap langkah, dan hasil bila selesai |
+| `GET /api/docx/report/<id>` | Laporan verifikasi dan token job yang selesai, tanpa unduhan |
+| `GET /api/docx/download/<id>` | Berkas `.docx` |
+| `POST /api/docx/cancel/<id>` | Minta job berhenti (berlaku di antara slide, bab, dan langkah) |
+| `DELETE /api/docx/<id>` | Hapus sesi dan berkas hasil tanpa menunggu kedaluwarsa |
+
+Parameter `POST /api/docx/start` (multipart): `presentation` (.pptx) dan `profile` wajib. Opsional: `chapters` (judul bab satu per baris, 1–20), `struktur` (nama struktur bab tersimpan di profil), `mapping_mode` (`batch` atau `per_slide`), `split_panels` (`ya` atau `tidak`), `workers` (1–8), `model_id`, `region`. Bila `chapters` tidak dikirim, struktur bab diambil dari struktur bernama `struktur`, atau struktur bawaan profil, atau bawaan aplikasi. `chapters` yang dikirim tetapi kosong ditolak. Struktur bab tersimpan dikelola lewat `PUT /api/profiles/<nama>/chapters`.
+
+Contoh:
+
+```bash
+B=http://127.0.0.1:5003
+
+# 1. Mulai
+ID=$(curl -s -F presentation=@materi.pptx -F profile=dokumen-2d $B/api/docx/start | jq -r .session_id)
+
+# 2. Pantau sampai selesai
+until [ "$(curl -s $B/api/docx/status/$ID | jq -r .status)" != running ]; do sleep 5; done
+
+# 3. Ambil hasil dan laporan
+curl -s $B/api/docx/status/$ID | jq '.status, .error'
+curl -s $B/api/docx/report/$ID | jq .laporan
+curl -s -o hasil.docx $B/api/docx/download/$ID
+
+# 4. Bersihkan (opsional; sesi juga kedaluwarsa otomatis)
+curl -s -X DELETE $B/api/docx/$ID
+```
+
+Kesalahan dikembalikan sebagai `{"error": "..."}` dengan kode 400 (permintaan tidak valid), 404 (profil atau sesi tidak ada), 409 (status tidak sesuai, mis. laporan sebelum selesai), atau 413 (berkas terlalu besar).
+
 ### Profil jenis dokumen dan pengaturan
 
 Bangun profil sekali per jenis dokumen dari HTML referensi (hasil CKEditor) dan, bila ada, PDF-nya:
@@ -202,6 +240,8 @@ Bangun profil sekali per jenis dokumen dari HTML referensi (hasil CKEditor) dan,
 ```bash
 .venv/bin/python profile_builder.py referensi/*.html --pdf referensi/*.pdf --name dokumen-2d --title "Dokumen 2d"
 ```
+
+Struktur bab disimpan di profil juga, di `profiles/<nama>/chapters.json`: satu atau beberapa struktur bernama (misalnya satu per periode) dengan satu bawaan. Kelola di panel **8. Struktur bab**. Saat profil dipilih, kolom Struktur bab di panel 2 terisi dari struktur bawaan dan tetap bisa diubah untuk proses itu saja. Profil tanpa struktur tersimpan memakai daftar bawaan aplikasi (`DOCX_DEFAULT_CHAPTERS` di `app.py`). Berkas ini tidak terhapus saat profil dibangun ulang.
 
 Profil tersimpan di `profiles/<nama>/` (layout tabel dan gambar, jenis caption, properti halaman dari PDF, statistik gaya penulisan). Pengaturan yang bisa diubah di menu (aturan penomoran caption, caption bawaan) disimpan di `settings.json` dan tidak terhapus saat profil dibangun ulang. Panduan gaya dari model (`style_guide.json`) dibuat dari menu dan juga tidak terhapus.
 

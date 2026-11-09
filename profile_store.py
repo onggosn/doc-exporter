@@ -17,6 +17,7 @@ from typing import Any
 
 PROFILES_DIR = Path(os.environ.get("PROFILES_DIR", Path(__file__).resolve().parent / "profiles"))
 SETTINGS_FILE = "settings.json"
+CHAPTERS_FILE = "chapters.json"
 STYLE_GUIDE_FILE = "style_guide.json"
 STYLE_SAMPLES_FILE = "style_samples.json"
 PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
@@ -25,6 +26,10 @@ LANJUT_MODES = ("per_bagian", "berlanjut")
 CAPTION_DEFAULTS = ("headline", "kosong")
 DEFAULT_CAPTION = "kosong"
 MAX_RULES = 50
+MAX_STRUCTURES = 10
+MAX_STRUCTURE_NAME_CHARS = 60
+MAX_CHAPTERS = 20  # sama dengan batas bab per dokumen di form
+MAX_CHAPTER_CHARS = 200
 MAX_KEYWORD_CHARS = 200
 MAX_PREFIX_CHARS = 20
 MAX_START_NUMBER = 9999
@@ -168,6 +173,65 @@ def validate_settings(data: Any) -> dict[str, Any]:
     }
 
 
+def validate_chapters(data: Any) -> dict[str, Any]:
+    """Struktur bab tersimpan per profil: {'bawaan': nama, 'daftar': [{'nama', 'bab': [judul, ...]}]}."""
+    if not isinstance(data, dict) or not isinstance(data.get("daftar"), list):
+        raise ProfileError("Struktur bab harus berisi daftar 'daftar'.")
+    if len(data["daftar"]) > MAX_STRUCTURES:
+        raise ProfileError(f"Maksimal {MAX_STRUCTURES} struktur bab per profil.")
+    structures, names = [], set()
+    for index, item in enumerate(data["daftar"], start=1):
+        label = f"Struktur bab #{index}"
+        name = item.get("nama") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > MAX_STRUCTURE_NAME_CHARS:
+            raise ProfileError(f"{label}: nama wajib diisi (maksimal {MAX_STRUCTURE_NAME_CHARS} karakter).")
+        name = " ".join(name.split())
+        if name.lower() in names:
+            raise ProfileError(f"{label}: nama '{name}' sudah dipakai struktur lain.")
+        names.add(name.lower())
+        chapters = item.get("bab")
+        if not isinstance(chapters, list) or not all(isinstance(c, str) for c in chapters):
+            raise ProfileError(f"{label} ('{name}'): 'bab' harus berupa daftar judul.")
+        chapters = [" ".join(c.split()) for c in chapters if c.strip()]
+        if not chapters:
+            raise ProfileError(f"{label} ('{name}'): isi minimal satu judul bab.")
+        if len(chapters) > MAX_CHAPTERS:
+            raise ProfileError(f"{label} ('{name}'): maksimal {MAX_CHAPTERS} bab.")
+        if any(len(c) > MAX_CHAPTER_CHARS for c in chapters):
+            raise ProfileError(f"{label} ('{name}'): judul bab maksimal {MAX_CHAPTER_CHARS} karakter.")
+        structures.append({"nama": name, "bab": chapters})
+    default = data.get("bawaan", "")
+    if not isinstance(default, str):
+        raise ProfileError("Struktur bab bawaan harus berupa nama.")
+    default = " ".join(default.split())
+    if structures:
+        by_name = {item["nama"].lower(): item["nama"] for item in structures}
+        if default and default.lower() not in by_name:
+            raise ProfileError(f"Struktur bab bawaan '{default}' tidak ada di daftar.")
+        default = by_name.get(default.lower(), structures[0]["nama"])
+    else:
+        default = ""
+    return {"bawaan": default, "daftar": structures}
+
+
+def load_chapters(name: str) -> dict[str, Any]:
+    path = _profile_path(name)
+    stored = _read_optional(path, CHAPTERS_FILE)
+    if stored is None:
+        return {"bawaan": "", "daftar": []}
+    try:
+        return validate_chapters(stored)
+    except ProfileError as exc:
+        raise ProfileError(f"Berkas struktur bab profil rusak: {exc}") from exc
+
+
+def save_chapters(name: str, data: Any) -> dict[str, Any]:
+    path = _profile_path(name)
+    chapters = validate_chapters(data)
+    _write_json(path / CHAPTERS_FILE, chapters)
+    return chapters
+
+
 def _write_json(path: Path, data: Any) -> None:
     temporary = path.with_name(f"{path.name}.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -248,6 +312,7 @@ def load_profile(name: str) -> dict[str, Any]:
         "evidence": numbering_evidence(captions),
         "settings": settings,
         "settings_saved": saved,
+        "struktur_bab": load_chapters(name),
     }
 
 

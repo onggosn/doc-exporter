@@ -47,6 +47,16 @@
   const STATS_ABBREVIATIONS = 5;
   const STATS_ITALIC_EXAMPLES = 6;
 
+  const chapterSelect = document.querySelector("#docx-chapter-select");
+  const structureSelect = document.querySelector("#docx-structure-select");
+  const structureName = document.querySelector("#docx-structure-name");
+  const structureChapters = document.querySelector("#docx-structure-chapters");
+  const structureFromForm = document.querySelector("#docx-structure-from-form");
+  const structureSave = document.querySelector("#docx-structure-save");
+  const structureDefault = document.querySelector("#docx-structure-default");
+  const structureDelete = document.querySelector("#docx-structure-delete");
+  const structureState = document.querySelector("#docx-structure-state");
+
   const createForm = document.querySelector("#docx-create-form");
   const createButton = document.querySelector("#docx-create-button");
   const progressPanel = document.querySelector("#docx-progress-panel");
@@ -60,6 +70,13 @@
   const downloadLink = document.querySelector("#docx-download");
 
   const POLL_MS = 2000;
+
+  // Isi awal kolom Struktur bab dari server dipakai sebagai "bawaan aplikasi" bila profil belum punya struktur.
+  const chaptersField = createForm.elements.chapters;
+  const APP_STRUCTURE = "__aplikasi__";
+  const NEW_STRUCTURE = "__baru__";
+  const APP_STRUCTURE_TEXT = chaptersField.defaultValue;
+  const DELETE_LABEL = structureDelete.textContent;
 
   const RESET_LABEL = resetButton.textContent;
   const RESET_CONFIRM_MS = 4000;
@@ -75,6 +92,8 @@
   let dirty = false;
   let resetTimer = null;
   let listLoaded = false;
+  let structures = { bawaan: "", daftar: [] };
+  let deleteTimer = null;
 
   function setStatus(message, error = false) {
     statusBox.textContent = message;
@@ -405,9 +424,81 @@
       renderSteps(stepDefs, data.steps);
       elapsedText.textContent = `${Math.round(data.elapsed_seconds)}s`;
       if (data.status === "done") return data.result;
-      if (data.status === "error") throw new Error(data.error);
+      if (data.status === "error" || data.status === "cancelled") throw new Error(data.error);
       await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }
+  }
+
+  function chapterLines(text) {
+    return text.split("\n").map((line) => line.trim()).filter(Boolean);
+  }
+
+  function findStructure(name) {
+    return structures.daftar.find((item) => item.nama === name);
+  }
+
+  function fillFormChapters(name) {
+    const found = findStructure(name);
+    chaptersField.value = found ? found.bab.join("\n") : APP_STRUCTURE_TEXT;
+  }
+
+  // Pilihan di form Buat DOCX: struktur tersimpan profil, ditambah bawaan aplikasi.
+  function renderFormStructures() {
+    const options = structures.daftar.map(
+      (item) => new Option(item.nama + (item.nama === structures.bawaan ? " (bawaan)" : ""), item.nama),
+    );
+    options.push(new Option("Bawaan aplikasi", APP_STRUCTURE));
+    chapterSelect.replaceChildren(...options);
+    chapterSelect.value = structures.bawaan || APP_STRUCTURE;
+    fillFormChapters(chapterSelect.value);
+  }
+
+  function showStructure(name) {
+    const found = findStructure(name);
+    structureSelect.value = found ? name : NEW_STRUCTURE;
+    structureName.value = found ? found.nama : "";
+    structureChapters.value = found ? found.bab.join("\n") : "";
+    const isDefault = Boolean(found) && found.nama === structures.bawaan;
+    structureDefault.disabled = !found || isDefault;
+    structureDelete.disabled = !found;
+    structureState.textContent = !found
+      ? structures.daftar.length
+        ? "Struktur baru: isi nama dan daftar bab, lalu simpan."
+        : "Profil ini belum punya struktur bab tersimpan. Form memakai bawaan aplikasi sampai Anda menyimpan satu."
+      : isDefault
+        ? "Struktur bawaan: mengisi kolom Struktur bab di panel 2 saat profil dipilih."
+        : "Struktur tersimpan. Klik Jadikan bawaan agar mengisi panel 2 otomatis.";
+  }
+
+  function renderEditor(selected) {
+    const options = structures.daftar.map(
+      (item) => new Option(item.nama + (item.nama === structures.bawaan ? " (bawaan)" : ""), item.nama),
+    );
+    options.push(new Option("Struktur baru…", NEW_STRUCTURE));
+    structureSelect.replaceChildren(...options);
+    showStructure(selected ?? structures.bawaan);
+  }
+
+  function renderStructures(selected) {
+    renderEditor(selected);
+    renderFormStructures();
+  }
+
+  async function putStructures(payload, message) {
+    const result = await api(`/api/profiles/${encodeURIComponent(profileName)}/chapters`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    structures = result.struktur_bab;
+    setStatus(message);
+    return structures;
+  }
+
+  function cancelDeleteConfirm() {
+    clearTimeout(deleteTimer);
+    structureDelete.textContent = DELETE_LABEL;
+    structureDelete.dataset.confirm = "";
   }
 
   function renderProfile(profile) {
@@ -453,6 +544,9 @@
     evidenceEmpty.hidden = profile.evidence.length > 0;
     renderPage(profile.page);
     renderStyle(profile.gaya);
+    structures = profile.struktur_bab || { bawaan: "", daftar: [] };
+    cancelDeleteConfirm();
+    renderStructures();
 
     rules = profile.settings.penomoran.map((rule) => ({ ...rule }));
     captionDefault = profile.settings.caption_default || "headline";
@@ -600,6 +694,72 @@
       setStatus(error.message, true);
     } finally {
       styleButton.disabled = false;
+    }
+  });
+
+  chapterSelect.addEventListener("change", () => fillFormChapters(chapterSelect.value));
+
+  structureSelect.addEventListener("change", () => {
+    cancelDeleteConfirm();
+    showStructure(structureSelect.value === NEW_STRUCTURE ? "" : structureSelect.value);
+  });
+
+  structureFromForm.addEventListener("click", () => {
+    structureChapters.value = chaptersField.value;
+    structureState.textContent = "Isian panel 2 disalin ke editor. Beri nama lalu simpan.";
+  });
+
+  structureSave.addEventListener("click", async () => {
+    cancelDeleteConfirm();
+    const name = structureName.value.trim().replace(/\s+/g, " ");
+    const chapters = chapterLines(structureChapters.value);
+    if (!name) return setStatus("Isi nama struktur bab.", true);
+    if (chapters.length === 0) return setStatus("Isi minimal satu judul bab.", true);
+    const editing = structureSelect.value === NEW_STRUCTURE ? "" : structureSelect.value;
+    const entry = { nama: name, bab: chapters };
+    const list = structures.daftar.map((item) => (item.nama === editing ? entry : item));
+    if (!editing) list.push(entry);
+    // Mengganti nama struktur bawaan tidak boleh membuatnya kehilangan status bawaan.
+    const defaultName = editing && editing === structures.bawaan ? name : structures.bawaan;
+    structureSave.disabled = true;
+    try {
+      await putStructures({ bawaan: defaultName, daftar: list }, `Struktur bab '${name}' disimpan.`);
+      renderStructures(name);
+    } catch (error) {
+      setStatus(error.message, true);
+    } finally {
+      structureSave.disabled = false;
+    }
+  });
+
+  structureDefault.addEventListener("click", async () => {
+    const name = structureSelect.value;
+    if (name === NEW_STRUCTURE) return;
+    try {
+      await putStructures({ bawaan: name, daftar: structures.daftar }, `'${name}' dijadikan struktur bawaan.`);
+      renderStructures(name);
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  });
+
+  // Dua klik: klik pertama meminta konfirmasi karena menghapus struktur tersimpan.
+  structureDelete.addEventListener("click", async () => {
+    const name = structureSelect.value;
+    if (name === NEW_STRUCTURE) return;
+    if (structureDelete.dataset.confirm !== "1") {
+      structureDelete.dataset.confirm = "1";
+      structureDelete.textContent = "Klik lagi untuk menghapus";
+      deleteTimer = setTimeout(cancelDeleteConfirm, RESET_CONFIRM_MS);
+      return;
+    }
+    cancelDeleteConfirm();
+    const list = structures.daftar.filter((item) => item.nama !== name);
+    try {
+      await putStructures({ bawaan: name === structures.bawaan ? "" : structures.bawaan, daftar: list }, `Struktur bab '${name}' dihapus.`);
+      renderStructures();
+    } catch (error) {
+      setStatus(error.message, true);
     }
   });
 

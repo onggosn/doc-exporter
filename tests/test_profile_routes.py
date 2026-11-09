@@ -96,6 +96,63 @@ class ProfileRoutesTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/profiles/dokumen-2d/style-guide", json={}).status_code, 400)
         self.assertEqual(self.client.post("/api/profiles/tidak-ada/style-guide", json={}).status_code, 404)
 
+    STRUCTURES = {"bawaan": "Mei 2025", "daftar": [
+        {"nama": "Mei 2025", "bab": ["1. Kesimpulan", "2 Ringkasan", "3. Proyeksi"]},
+        {"nama": "Maret 2026", "bab": ["2. Pokok Pembahasan", "3. Rancangan"]},
+    ]}
+
+    def test_profile_without_saved_chapters_reports_an_empty_structure_list(self):
+        self.assertEqual(self.client.get("/api/profiles/dokumen-2d").json["struktur_bab"], {"bawaan": "", "daftar": []})
+
+    def test_chapter_structures_are_saved_per_profile_and_come_back_with_the_profile(self):
+        response = self.client.put("/api/profiles/dokumen-2d/chapters", json=self.STRUCTURES)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["struktur_bab"], self.STRUCTURES)
+        self.assertEqual(self.client.get("/api/profiles/dokumen-2d").json["struktur_bab"], self.STRUCTURES)
+        self.assertTrue((profile_store.PROFILES_DIR / "dokumen-2d" / "chapters.json").is_file())
+        # pengaturan penomoran tidak ikut terpengaruh oleh struktur bab, dan sebaliknya
+        self.assertFalse((profile_store.PROFILES_DIR / "dokumen-2d" / "settings.json").exists())
+        self.client.put("/api/profiles/dokumen-2d/settings", json={"penomoran": [RULE], "caption_default": "kosong"})
+        self.assertEqual(self.client.get("/api/profiles/dokumen-2d").json["struktur_bab"], self.STRUCTURES)
+
+    def test_chapter_structures_are_normalized_and_the_default_falls_back_to_the_first(self):
+        messy = {"bawaan": " maret   2026 ", "daftar": [{"nama": "  Maret   2026 ", "bab": ["  1.  Satu  ", "", "2. Dua"]}]}
+        saved = self.client.put("/api/profiles/dokumen-2d/chapters", json=messy).json["struktur_bab"]
+        self.assertEqual(saved, {"bawaan": "Maret 2026", "daftar": [{"nama": "Maret 2026", "bab": ["1. Satu", "2. Dua"]}]})
+        self.assertEqual(self.client.put("/api/profiles/dokumen-2d/chapters", json={"bawaan": "", "daftar": [
+            {"nama": "A", "bab": ["x"]}, {"nama": "B", "bab": ["y"]}]}).json["struktur_bab"]["bawaan"], "A")
+        emptied = self.client.put("/api/profiles/dokumen-2d/chapters", json={"bawaan": "A", "daftar": []})
+        self.assertEqual(emptied.json["struktur_bab"], {"bawaan": "", "daftar": []})  # menghapus semua struktur
+
+    def test_invalid_chapter_structures_return_clear_400_and_save_nothing(self):
+        good = {"nama": "A", "bab": ["1. Satu"]}
+        cases = [
+            ({"daftar": "x"}, "daftar"),
+            ({"bawaan": "", "daftar": [{"nama": "", "bab": ["x"]}]}, "nama wajib diisi"),
+            ({"bawaan": "", "daftar": [{"nama": "n" * 61, "bab": ["x"]}]}, "nama wajib diisi"),
+            ({"bawaan": "", "daftar": [good, {"nama": "a", "bab": ["y"]}]}, "sudah dipakai"),
+            ({"bawaan": "", "daftar": [{"nama": "A", "bab": []}]}, "minimal satu judul"),
+            ({"bawaan": "", "daftar": [{"nama": "A", "bab": ["  ", ""]}]}, "minimal satu judul"),
+            ({"bawaan": "", "daftar": [{"nama": "A", "bab": [str(i) for i in range(21)]}]}, "maksimal 20 bab"),
+            ({"bawaan": "", "daftar": [{"nama": "A", "bab": ["x" * 201]}]}, "maksimal 200 karakter"),
+            ({"bawaan": "", "daftar": [{"nama": "A", "bab": [1]}]}, "daftar judul"),
+            ({"bawaan": "Tidak Ada", "daftar": [good]}, "tidak ada di daftar"),
+            ({"bawaan": "", "daftar": [{"nama": f"N{i}", "bab": ["x"]} for i in range(11)]}, "Maksimal 10"),
+        ]
+        for body, message in cases:
+            response = self.client.put("/api/profiles/dokumen-2d/chapters", json=body)
+            self.assertEqual(response.status_code, 400, body)
+            self.assertIn(message, response.json["error"], body)
+        self.assertEqual(self.client.put("/api/profiles/dokumen-2d/chapters", data="bukan json").status_code, 400)
+        self.assertEqual(self.client.put("/api/profiles/tidak-ada/chapters", json=self.STRUCTURES).status_code, 404)
+        self.assertFalse((profile_store.PROFILES_DIR / "dokumen-2d" / "chapters.json").exists())
+
+    def test_corrupt_chapter_file_is_reported_instead_of_silently_ignored(self):
+        (profile_store.PROFILES_DIR / "dokumen-2d" / "chapters.json").write_text('{"daftar": 3}', encoding="utf-8")
+        response = self.client.get("/api/profiles/dokumen-2d")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Berkas struktur bab profil rusak", response.json["error"])
+
     def test_invalid_settings_return_clear_400(self):
         response = self.client.put("/api/profiles/dokumen-2d/settings", json={"penomoran": [{**RULE, "mulai": "1"}]})
         self.assertEqual(response.status_code, 400)

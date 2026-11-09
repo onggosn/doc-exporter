@@ -1,6 +1,7 @@
 import io
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -76,7 +77,7 @@ class DocxJobTests(unittest.TestCase):
         self.addCleanup(log_patcher.stop)
         self.client = app.app.test_client()
 
-    def run_job(self, generator=FakeGenerator, chapters=("Ringkasan",), appendix=False):
+    def run_job(self, generator=FakeGenerator, chapters=("Ringkasan",), appendix=False, pre_cancel=False):
         image = self.tmp / "slide-2.png"
         Image.new("RGB", (400, 300), "teal").save(image)
         deck = {"items": [slide("cover", "Judul Dokumen", ["Rapat Dewan Gubernur"]),
@@ -101,8 +102,10 @@ class DocxJobTests(unittest.TestCase):
             "status": "running", "steps": {k: {"status": "pending", "detail": "", "current": 0, "total": 0}
                                            for k, _ in app.DOCX_STEPS},
             "result": None, "error": None, "file_path": None, "work_dir": str(work),
-            "created_at": time.time(), "finished_at": None,
+            "created_at": time.time(), "finished_at": None, "cancel": threading.Event(),
         }
+        if pre_cancel:
+            app.DOCX_SESSIONS["sid"]["cancel"].set()
         config = {"chapters": list(chapters), "profile": "dokumen-2d", "mapping_mode": "batch",
                   "model_id": "model-uji", "region": None, "document_name": "contoh.pptx"}
         with patch.object(app, "ingest_pptx", return_value=deck), \
@@ -280,6 +283,45 @@ class DocxJobTests(unittest.TestCase):
         session = app.DOCX_SESSIONS["sid"]
         self.assertEqual((session["status"], session["error"]), ("error", "kredensial ditolak"))
 
+    def test_job_stops_between_steps_when_cancelled_and_logs_the_tokens_spent_so_far(self):
+        ran = []
+
+        class Cancelling(FakeGenerator):
+            usage_totals = {"visuals": {"input_tokens": 10, "output_tokens": 2}}
+
+            def _map_slides(self, deck, chapters, mode, progress):
+                progress("mapping", "running", "", 0, 1)
+                app.DOCX_SESSIONS["sid"]["cancel"].set()  # pengguna menekan batal saat pemetaan
+                progress("mapping", "running", "", 1, 1)  # callback progres berikutnya menghentikan job
+                return super()._map_slides(deck, chapters, mode, progress)
+
+            def summarize_images(self, deck, progress, skip_refs=frozenset()):
+                ran.append("captions")
+
+            def write_chapter_narration(self, chapter, slides, style_text):
+                ran.append("writing")
+                return super().write_chapter_narration(chapter, slides, style_text)
+
+        self.run_job(Cancelling)
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual((session["status"], session["error"]), ("cancelled", "Dibatalkan oleh pengguna."))
+        self.assertEqual(session["steps"]["mapping"]["status"], "cancelled")
+        self.assertEqual(ran, [])  # langkah sesudah pembatalan tidak dijalankan
+        self.assertIsNone(session["file_path"])
+        name, status, _timing, _total, usage = self.log.call_args.args
+        self.assertEqual(status, "cancelled")
+        self.assertEqual(usage, {"visuals": {"input_tokens": 10, "output_tokens": 2}})
+        status_response = self.client.get("/api/docx/status/sid").json
+        self.assertEqual((status_response["status"], status_response["error"]), ("cancelled", "Dibatalkan oleh pengguna."))
+
+    def test_job_cancelled_before_it_starts_stops_at_the_first_progress_call(self):
+        self.run_job(pre_cancel=True)
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual(session["status"], "cancelled")
+        self.assertEqual(session["steps"]["ingest"]["status"], "cancelled")
+        self.assertEqual(FakeGenerator.instances, [])  # model tidak pernah dipanggil
+        self.assertEqual(self.log.call_args.args[1], "cancelled")
+
     def test_status_and_download_routes(self):
         self.run_job()
         status = self.client.get("/api/docx/status/sid").json
@@ -315,6 +357,129 @@ class DocxJobTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/docx/download/nope").status_code, 404)
         app.DOCX_SESSIONS["run"] = {"status": "running", "created_at": time.time()}
         self.assertEqual(self.client.get("/api/docx/download/run").status_code, 404)
+
+
+class DocxApiTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        profiles = self.tmp / "profiles"
+        profiles.mkdir()
+        write_profile(profiles)
+        patcher = patch.object(profile_store, "PROFILES_DIR", profiles)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        uploads = self.tmp / "uploads"
+        uploads.mkdir()
+        upload_patcher = patch.object(app, "UPLOAD_DIR", uploads)
+        upload_patcher.start()
+        self.addCleanup(upload_patcher.stop)
+        self.addCleanup(app.DOCX_SESSIONS.clear)
+        self.client = app.app.test_client()
+
+    def session(self, status="running", **extra):
+        work = self.tmp / f"work-{status}"
+        work.mkdir(exist_ok=True)
+        (work / "dokumen.docx").write_bytes(b"docx")
+        app.DOCX_SESSIONS["s1"] = {
+            "status": status, "steps": {}, "result": None, "error": None, "file_path": str(work / "dokumen.docx"),
+            "work_dir": str(work), "created_at": time.time(), "finished_at": None, "cancel": threading.Event(), **extra,
+        }
+        return app.DOCX_SESSIONS["s1"], work
+
+    def start(self, **overrides):
+        data = {"presentation": (io.BytesIO(b"x"), "a.pptx"), "profile": "dokumen-2d"}
+        data.update(overrides)
+        with patch.object(app.threading, "Thread") as thread:
+            response = self.client.post("/api/docx/start", data=data, content_type="multipart/form-data")
+        return response, thread
+
+    def test_openapi_contract_matches_the_routes_that_really_exist(self):
+        spec = self.client.get("/api/docx/openapi.json").json
+        self.assertEqual(spec["openapi"], "3.0.3")
+        documented = {(path.replace("{session_id}", "<session_id>"), method.upper())
+                      for path, item in spec["paths"].items() for method in item}
+        real = {(rule.rule, method) for rule in app.app.url_map.iter_rules() if rule.rule.startswith("/api/docx/")
+                for method in rule.methods - {"HEAD", "OPTIONS"}}
+        self.assertEqual(documented, real)
+
+    def test_swagger_ui_page_points_to_the_openapi_contract(self):
+        response = self.client.get("/api/docx/docs")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.content_type)
+        self.assertIn("/api/docx/openapi.json", response.get_data(as_text=True))
+
+    def test_options_lists_defaults_limits_and_profiles(self):
+        with patch.dict("os.environ", {"DOCX_WORKERS": ""}):
+            options = self.client.get("/api/docx/options").json
+        self.assertEqual([p["name"] for p in options["profil"]], ["dokumen-2d"])
+        self.assertEqual(options["mapping_mode"], {"nilai": ["batch", "per_slide"], "bawaan": "batch"})
+        self.assertEqual(options["workers"], {"bawaan": app.DOCX_DEFAULT_WORKERS, "min": 1, "maks": app.MAX_WORKERS})
+        self.assertEqual(len(options["bab"]["bawaan_aplikasi"]), 17)
+        self.assertEqual(options["bab"]["maksimal"], 20)
+        self.assertEqual([step["key"] for step in options["langkah"]], [k for k, _ in app.DOCX_STEPS])
+        self.assertEqual(options["sesi_kedaluwarsa_detik"], app.MAPPING_SESSION_TTL_SECONDS)
+
+    def test_start_without_chapters_uses_profile_default_then_named_structure_then_app_default(self):
+        response, thread = self.start()  # profil belum punya struktur: bawaan aplikasi
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(thread.call_args.kwargs["args"][2]["chapters"], app.DOCX_DEFAULT_CHAPTERS.splitlines())
+
+        profile_store.save_chapters("dokumen-2d", {"bawaan": "Mei", "daftar": [
+            {"nama": "Mei", "bab": ["1. Satu", "2. Dua"]}, {"nama": "Maret", "bab": ["A", "B", "C"]}]})
+        _, thread = self.start()
+        self.assertEqual(thread.call_args.kwargs["args"][2]["chapters"], ["1. Satu", "2. Dua"])
+        _, thread = self.start(struktur=" maret ")
+        self.assertEqual(thread.call_args.kwargs["args"][2]["chapters"], ["A", "B", "C"])
+        _, thread = self.start(chapters="Bab Sendiri", struktur="Maret")  # 'chapters' menang atas 'struktur'
+        self.assertEqual(thread.call_args.kwargs["args"][2]["chapters"], ["Bab Sendiri"])
+
+    def test_unknown_structure_and_blank_chapters_are_rejected(self):
+        profile_store.save_chapters("dokumen-2d", {"bawaan": "Mei", "daftar": [{"nama": "Mei", "bab": ["1. Satu"]}]})
+        unknown, _ = self.start(struktur="Tidak Ada")
+        self.assertEqual(unknown.status_code, 400)
+        self.assertIn("tersedia: Mei", unknown.json["error"])
+        blank, _ = self.start(chapters="  \n ")
+        self.assertEqual(blank.status_code, 400)
+        self.assertEqual(list((self.tmp / "uploads").iterdir()), [])
+
+    def test_report_is_available_only_for_finished_jobs(self):
+        self.assertEqual(self.client.get("/api/docx/report/tidak-ada").status_code, 404)
+        self.session("running")
+        running = self.client.get("/api/docx/report/s1")
+        self.assertEqual((running.status_code, running.json["status"]), (409, "running"))
+        self.session("cancelled", error="Dibatalkan oleh pengguna.")
+        cancelled = self.client.get("/api/docx/report/s1")
+        self.assertEqual((cancelled.status_code, cancelled.json["error"]), (409, "Dibatalkan oleh pengguna."))
+        self.session("done", result={"filename": "a.docx", "laporan": {"slide": 3}, "token": {"visuals": {"input_tokens": 1, "output_tokens": 2}}})
+        done = self.client.get("/api/docx/report/s1")
+        self.assertEqual(done.status_code, 200)
+        self.assertEqual((done.json["filename"], done.json["laporan"], done.json["download_url"]),
+                         ("a.docx", {"slide": 3}, "/api/docx/download/s1"))
+
+    def test_cancel_only_applies_to_running_jobs(self):
+        self.assertEqual(self.client.post("/api/docx/cancel/tidak-ada").status_code, 404)
+        session, _ = self.session("running")
+        response = self.client.post("/api/docx/cancel/s1")
+        self.assertEqual((response.status_code, response.json), (202, {"status": "cancelling"}))
+        self.assertTrue(session["cancel"].is_set())
+        session["status"] = "done"
+        again = self.client.post("/api/docx/cancel/s1")
+        self.assertEqual((again.status_code, again.json["status"]), (409, "done"))
+
+    def test_delete_removes_finished_sessions_with_their_files_but_not_running_ones(self):
+        self.assertEqual(self.client.delete("/api/docx/tidak-ada").status_code, 404)
+        _, work = self.session("running")
+        blocked = self.client.delete("/api/docx/s1")
+        self.assertEqual(blocked.status_code, 409)
+        self.assertTrue(work.exists())
+        app.DOCX_SESSIONS["s1"]["status"] = "done"
+        deleted = self.client.delete("/api/docx/s1")
+        self.assertEqual((deleted.status_code, deleted.json), (200, {"dihapus": True}))
+        self.assertNotIn("s1", app.DOCX_SESSIONS)
+        self.assertFalse(work.exists())
+        self.assertEqual(self.client.get("/api/docx/status/s1").status_code, 404)
 
 
 class DefaultChaptersTests(unittest.TestCase):

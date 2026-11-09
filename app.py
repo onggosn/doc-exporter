@@ -19,6 +19,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 import doc_composer
+from docx_api_spec import DOCX_OPENAPI
 import profile_store
 from bedrock_service import (
     DEFAULT_MODEL_ID, MAX_WORKERS, BedrockDocumentGenerator, BedrockError, NarrationPartial, run_parallel,
@@ -832,6 +833,10 @@ def _summary_warnings(deck: dict) -> dict[str, list[str]]:
     return found
 
 
+class JobCancelled(Exception):
+    """Pengguna meminta job DOCX dibatalkan; dilempar dari callback progres di antara langkah dan item."""
+
+
 class _Skipped(Exception):
     """Bab tidak dikerjakan karena proses sudah dihentikan oleh kegagalan beruntun."""
 
@@ -911,6 +916,9 @@ def _run_docx_job(session_id: str, ppt_path: Path, config: dict) -> None:
     job_started_at = time.time()
 
     def progress(step: str, status: str, detail: str = "", current: int = 0, total: int = 0) -> None:
+        cancel = session.get("cancel")
+        if cancel is not None and cancel.is_set():  # berlaku di antara slide, bab, dan langkah
+            raise JobCancelled("Dibatalkan oleh pengguna.")
         now = time.time()
         if status == "running":
             active["key"] = step
@@ -980,6 +988,9 @@ def _run_docx_job(session_id: str, ppt_path: Path, config: dict) -> None:
         }
         session["file_path"] = str(output)
         session["status"] = "done"
+    except JobCancelled as exc:
+        session["steps"][active["key"]]["status"] = "cancelled"
+        session["status"], session["error"] = "cancelled", str(exc)
     except (ValueError, BedrockError, DocxBuildError, profile_store.ProfileNotFound) as exc:
         app.logger.exception("Pembuatan DOCX berhenti di langkah '%s': %s", active["key"], exc)
         session["steps"][active["key"]]["status"] = "error"
@@ -995,11 +1006,26 @@ def _run_docx_job(session_id: str, ppt_path: Path, config: dict) -> None:
         shutil.rmtree(work_dir / "slides", ignore_errors=True)  # gambar sudah tertanam di DOCX
         _log_processing_times(
             f"{config['document_name']} {DOCX_LOG_SUFFIX}",
-            "done" if session["status"] == "done" else "error",
+            session["status"] if session["status"] in ("done", "cancelled") else "error",
             step_timing,
             round(time.time() - job_started_at, 2),
             _usage_for_log(generator.usage_totals if generator else {}),
         )
+
+
+def _profile_chapters_text(profile_name: str, structure_name: str) -> str:
+    """Struktur bab untuk permintaan tanpa 'chapters': struktur bernama (bila 'struktur' diisi), atau bawaan
+    profil, atau bawaan aplikasi."""
+    stored = profile_store.load_chapters(profile_name)
+    wanted = " ".join(structure_name.split())
+    if wanted:
+        found = next((item for item in stored["daftar"] if item["nama"].lower() == wanted.lower()), None)
+        if found is None:
+            names = ", ".join(item["nama"] for item in stored["daftar"]) or "belum ada"
+            raise ValueError(f"Struktur bab '{wanted}' tidak ada di profil (tersedia: {names}).")
+        return "\n".join(found["bab"])
+    default = next((item for item in stored["daftar"] if item["nama"] == stored["bawaan"]), None)
+    return "\n".join(default["bab"]) if default else DOCX_DEFAULT_CHAPTERS
 
 
 @app.post("/api/docx/start")
@@ -1013,9 +1039,12 @@ def docx_start():
             raise ValueError("Pilih file PowerPoint yang akan diolah.")
         if Path(upload.filename).suffix.lower() not in ALLOWED_EXTENSIONS:
             raise ValueError("File harus berformat .pptx.")
-        chapters = _read_chapters(request.form.get("chapters", ""))
         profile_name = request.form.get("profile", "").strip()
         profile_store.load_profile(profile_name)  # memastikan profil ada sebelum menyimpan unggahan
+        if "chapters" in request.form:
+            chapters = _read_chapters(request.form["chapters"])
+        else:  # klien API boleh tidak mengirim bab: struktur tersimpan profil, lalu bawaan aplikasi
+            chapters = _read_chapters(_profile_chapters_text(profile_name, request.form.get("struktur", "")))
         mapping_mode = request.form.get("mapping_mode", "batch").strip()
         if mapping_mode not in ("batch", "per_slide"):
             raise ValueError("Mode pemetaan slide tidak dikenali.")
@@ -1029,7 +1058,7 @@ def docx_start():
             "steps": {key: {"status": "pending", "detail": "", "current": 0, "total": totals[key]}
                       for key, _ in DOCX_STEPS},
             "result": None, "error": None, "file_path": None, "work_dir": work_dir,
-            "created_at": time.time(), "finished_at": None,
+            "created_at": time.time(), "finished_at": None, "cancel": threading.Event(),
         }
         config = {
             "chapters": chapters, "profile": profile_name, "mapping_mode": mapping_mode,
@@ -1072,7 +1101,7 @@ def docx_status(session_id: str):
     }
     if session["status"] == "done":
         response["result"] = {**session["result"], "download_url": f"/api/docx/download/{session_id}"}
-    elif session["status"] == "error":
+    elif session["status"] in ("error", "cancelled"):
         response["error"] = session["error"]
     return jsonify(response)
 
@@ -1085,6 +1114,81 @@ def docx_download(session_id: str):
     return send_file(
         session["file_path"], mimetype=DOCX_MIME, as_attachment=True, download_name=session["result"]["filename"]
     )
+
+
+@app.get("/api/docx/report/<session_id>")
+def docx_report(session_id: str):
+    """Laporan verifikasi dan pemakaian token sebuah job yang sudah selesai (tanpa unduhan)."""
+    session = DOCX_SESSIONS.get(session_id)
+    if not session:
+        return jsonify({"error": "Sesi pembuatan DOCX tidak ditemukan atau sudah berakhir."}), 404
+    if session["status"] != "done":
+        message = session["error"] if session["status"] in ("error", "cancelled") else "Proses belum selesai."
+        return jsonify({"error": message, "status": session["status"]}), 409
+    return jsonify({**session["result"], "download_url": f"/api/docx/download/{session_id}"})
+
+
+@app.post("/api/docx/cancel/<session_id>")
+def docx_cancel(session_id: str):
+    """Minta job berhenti. Berlaku di antara slide, bab, dan langkah; panggilan model yang sedang berjalan
+    diselesaikan dulu. Cek hasilnya lewat status (akan menjadi 'cancelled')."""
+    session = DOCX_SESSIONS.get(session_id)
+    if not session:
+        return jsonify({"error": "Sesi pembuatan DOCX tidak ditemukan atau sudah berakhir."}), 404
+    if session["status"] != "running":
+        return jsonify({"error": f"Proses sudah berakhir (status: {session['status']}).", "status": session["status"]}), 409
+    session["cancel"].set()
+    return jsonify({"status": "cancelling"}), 202
+
+
+@app.delete("/api/docx/<session_id>")
+def docx_delete(session_id: str):
+    """Hapus sesi beserta berkas DOCX hasilnya tanpa menunggu kedaluwarsa."""
+    session = DOCX_SESSIONS.get(session_id)
+    if not session:
+        return jsonify({"error": "Sesi pembuatan DOCX tidak ditemukan atau sudah berakhir."}), 404
+    if session["status"] == "running":
+        return jsonify({"error": "Proses masih berjalan; batalkan dulu lewat /api/docx/cancel.", "status": "running"}), 409
+    DOCX_SESSIONS.pop(session_id, None)
+    shutil.rmtree(session["work_dir"], ignore_errors=True)
+    return jsonify({"dihapus": True})
+
+
+@app.get("/api/docx/options")
+def docx_options():
+    """Nilai bawaan dan batas yang dipakai /api/docx/start, supaya klien tidak menebak."""
+    return jsonify({
+        "profil": [{"name": p["name"], "title": p["title"]} for p in profile_store.list_profiles()],
+        "mapping_mode": {"nilai": ["batch", "per_slide"], "bawaan": "batch"},
+        "split_panels": {"nilai": ["ya", "tidak"], "bawaan": "ya"},
+        "workers": {"bawaan": _read_workers(""), "min": 1, "maks": MAX_WORKERS},
+        "model_id": os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_MODEL_ID,
+        "region": os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or None,
+        "bab": {"maksimal": 20, "bawaan_aplikasi": DOCX_DEFAULT_CHAPTERS.splitlines()},
+        "batas_unggah_mb": MAX_UPLOAD_MB,
+        "sesi_kedaluwarsa_detik": MAPPING_SESSION_TTL_SECONDS,
+        "langkah": [{"key": key, "label": label} for key, label in DOCX_STEPS],
+    })
+
+
+@app.get("/api/docx/openapi.json")
+def docx_openapi():
+    return jsonify(DOCX_OPENAPI)
+
+
+SWAGGER_UI_HTML = """<!doctype html>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API PPTX ke DOCX</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.17.14/swagger-ui.min.css">
+</head><body><div id="swagger-ui"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.17.14/swagger-ui-bundle.min.js"></script>
+<script>window.ui = SwaggerUIBundle({url: "/api/docx/openapi.json", dom_id: "#swagger-ui", deepLinking: true});</script>
+</body></html>"""
+
+
+@app.get("/api/docx/docs")
+def docx_swagger_ui():
+    return SWAGGER_UI_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 def _profile_response(action):
@@ -1139,6 +1243,12 @@ def profile_style_guide(name: str):
         return {"panduan": saved, "usang": False}
 
     return _profile_response(action)
+
+
+@app.put("/api/profiles/<name>/chapters")
+def profile_chapters_save(name: str):
+    body = request.get_json(silent=True)
+    return _profile_response(lambda: {"struktur_bab": profile_store.save_chapters(name, body)})
 
 
 @app.delete("/api/profiles/<name>/settings")

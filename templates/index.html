@@ -311,9 +311,13 @@
         <input type="file" name="presentation" accept=".pptx" required>
       </label>
       <label class="field">
+        <span>Struktur bab tersimpan di profil</span>
+        <select id="docx-chapter-select"></select>
+      </label>
+      <label class="field">
         <span>Struktur bab (satu judul per baris)</span>
         <textarea name="chapters" rows="18" required placeholder="Contoh:&#10;Ringkasan Asesmen&#10;Rekomendasi Kebijakan">{{ docx_default_chapters }}</textarea>
-        <small>Judul bab dicocokkan dengan kata kunci aturan penomoran di profil (panel Penomoran caption).</small>
+        <small>Terisi dari struktur bawaan profil (kelola di panel 8) dan boleh diubah untuk proses ini saja. Judul bab dicocokkan dengan kata kunci aturan penomoran di profil (panel Penomoran caption).</small>
       </label>
       <div class="grid">
         <label class="field">
@@ -489,6 +493,30 @@
         <div class="actions">
           <button type="button" class="button primary" id="docx-style-button">Buat panduan gaya</button>
         </div>
+      </section>
+
+      <section class="panel">
+        <h2>8. Struktur bab</h2>
+        <p class="help">Simpan struktur bab untuk jenis dokumen ini, satu atau beberapa (mis. satu per periode). Struktur bawaan mengisi kolom Struktur bab di panel 2 saat profil dipilih. Menyimpan di sini tidak mengubah penomoran caption, dan membangun ulang profil tidak menghapusnya.</p>
+        <label class="field">
+          <span>Struktur</span>
+          <select id="docx-structure-select"></select>
+        </label>
+        <label class="field">
+          <span>Nama struktur</span>
+          <input id="docx-structure-name" maxlength="60" placeholder="Contoh: Mei 2025">
+        </label>
+        <label class="field">
+          <span>Daftar bab (satu judul per baris, maksimal 20)</span>
+          <textarea id="docx-structure-chapters" rows="14"></textarea>
+        </label>
+        <div class="actions">
+          <button type="button" class="button secondary" id="docx-structure-from-form">Ambil dari isian panel 2</button>
+          <button type="button" class="button primary" id="docx-structure-save">Simpan struktur</button>
+          <button type="button" class="button secondary" id="docx-structure-default">Jadikan bawaan</button>
+          <button type="button" class="button secondary" id="docx-structure-delete">Hapus</button>
+        </div>
+        <p class="help" id="docx-structure-state"></p>
       </section>
     </div>
     <div id="docx-status" role="status" aria-live="polite"></div>
