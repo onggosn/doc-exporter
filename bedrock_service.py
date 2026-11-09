@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from html import escape as html_escape
 from pathlib import Path
 from typing import Any
 
 import boto3
-import bleach
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from typing import Callable
@@ -90,18 +87,6 @@ def run_parallel(items, worker, workers=1, stop_on_error=True, on_done=None):
 
 DEFAULT_MODEL_ID = "global.anthropic.claude-opus-4-6-v1"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-ALLOWED_HTML_TAGS = {
-    "h2", "h3", "p", "ul", "ol", "li", "table", "thead", "tbody", "tr",
-    "th", "td", "strong", "em",
-}
-
-INLINE_IMAGE_RE = re.compile(
-    r'<img[^>]*\bsrc="data:image/(?P<fmt>png|jpe?g|gif|webp);base64,(?P<data>[A-Za-z0-9+/=]+)"[^>]*>',
-    re.IGNORECASE,
-)
-INLINE_IMAGE_FORMATS = {"png": "png", "jpg": "jpeg", "jpeg": "jpeg", "gif": "gif", "webp": "webp"}
-MAX_KB_CORRECTION_IMAGES = 6
-
 
 class BedrockError(RuntimeError):
     """Bedrock request or response error safe to show in the UI."""
@@ -123,7 +108,6 @@ class BedrockDocumentGenerator:
         self,
         model_id: str | None = None,
         region: str | None = None,
-        knowledge_base_id: str | None = None,
     ):
         self.model_id = model_id or os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_MODEL_ID
         if not self.model_id:
@@ -135,7 +119,6 @@ class BedrockDocumentGenerator:
             or os.environ.get("AWS_REGION")
             or os.environ.get("AWS_DEFAULT_REGION")
         )
-        self.knowledge_base_id = knowledge_base_id or os.environ.get("BEDROCK_KNOWLEDGE_BASE_ID")
         try:
             session = boto3.Session(region_name=self.region)
             self.region = self.region or session.region_name
@@ -146,13 +129,6 @@ class BedrockDocumentGenerator:
                 )
             self.client = session.client(
                 "bedrock-runtime", region_name=self.region, config=BEDROCK_CLIENT_CONFIG
-            )
-            self.knowledge_base_client = (
-                session.client(
-                    "bedrock-agent-runtime", region_name=self.region, config=BEDROCK_CLIENT_CONFIG
-                )
-                if self.knowledge_base_id
-                else None
             )
         except (BotoCoreError, ClientError) as exc:
             raise BedrockError(f"Tidak dapat menyiapkan koneksi AWS Bedrock: {exc}") from exc
@@ -512,185 +488,6 @@ class BedrockDocumentGenerator:
                 feedback = f"\n\nPercobaan sebelumnya gagal: {exc}. Perbaiki agar setiap ref muncul tepat satu kali."
         raise AssertionError("unreachable")
 
-    @staticmethod
-    def _chapter_images_html(deck: dict[str, Any], refs: list[str]) -> str:
-        """Sisipkan gambar slide + caption asli (tanpa lewat model) sesuai urutan slide."""
-        refs_in_chapter = set(refs)
-        figures = []
-        for slide in deck["items"]:
-            if slide["ref"] not in refs_in_chapter:
-                continue
-            image_path = slide.get("image_path")
-            if not image_path:
-                continue
-            try:
-                image_bytes = Path(image_path).read_bytes()
-            except OSError:
-                continue
-            if len(image_bytes) > MAX_IMAGE_BYTES:
-                continue
-            caption = html_escape((slide.get("title") or "").strip())
-            encoded = base64.b64encode(image_bytes).decode("ascii")
-            figcaption = f"<figcaption>{caption}</figcaption>" if caption else ""
-            figures.append(
-                f'<figure><img src="data:image/png;base64,{encoded}" alt="{caption}">{figcaption}</figure>'
-            )
-        return "\n".join(figures)
-
-    def _retrieve_examples(
-        self, deck: dict[str, Any], progress_callback: ProgressCallback | None = None
-    ) -> list[str]:
-        if not self.knowledge_base_client or not self.knowledge_base_id:
-            _report(progress_callback, "kb", "skipped", "Knowledge Base tidak dikonfigurasi", 0, 0)
-            return []
-        _report(progress_callback, "kb", "running", "", 0, 1)
-        query = "\n".join(self._slide_text(slide) for slide in deck["items"])[:4000]
-        try:
-            response = self.knowledge_base_client.retrieve(
-                knowledgeBaseId=self.knowledge_base_id,
-                retrievalQuery={"text": query},
-                retrievalConfiguration={
-                    "managedSearchConfiguration": {"numberOfResults": 3}
-                },
-            )
-        except (BotoCoreError, ClientError) as exc:
-            message = str(exc)
-            if isinstance(exc, ClientError):
-                message = exc.response.get("Error", {}).get("Message", message)
-            logger.error("Retrieve KB ERROR: %s", message)
-            raise BedrockError(f"Gagal mengambil contoh dari Knowledge Base: {message}") from exc
-        examples = []
-        for result in response.get("retrievalResults", []):
-            text = result.get("content", {}).get("text", "").strip()
-            if text:
-                examples.append(text[:10000])
-        logger.info("Retrieve KB selesai: %s contoh ditemukan (query: %s)", len(examples), query[:200])
-        _report(progress_callback, "kb", "done", f"{len(examples)} contoh", 1, 1)
-        return examples
-
-    def generate(
-        self,
-        deck: dict[str, Any],
-        chapters: list[str],
-        references: list[dict[str, str]],
-        mapping_mode: str = "batch",
-        progress_callback: ProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        if not deck["items"]:
-            raise BedrockError("Presentasi tidak memiliki slide.")
-        self.describe_visuals(deck, progress_callback)
-        mapping = self._map_slides(deck, chapters, mapping_mode, progress_callback)
-        return self.generate_from_mapping(deck, chapters, references, mapping, progress_callback)
-
-    def generate_from_mapping(
-        self,
-        deck: dict[str, Any],
-        chapters: list[str],
-        references: list[dict[str, str]],
-        mapping: dict[str, list[str]],
-        progress_callback: ProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        """Susun dokumen akhir dari pemetaan slide->bab yang sudah dihitung sebelumnya
-        (baik oleh _map_slides maupun secara manual lewat classify_slide per slide)."""
-        knowledge_base_examples = self._retrieve_examples(deck, progress_callback)
-        reference_text = ""
-        if references:
-            reference_text = "\n\nContoh pasangan PPT dan dokumen final untuk meniru gaya/struktur:\n"
-            reference_text += "\n\n".join(
-                f"Contoh {i} - isi PPT:\n{ref['ppt_text']}\nDokumen final:\n{ref['final_text']}"
-                for i, ref in enumerate(references, start=1)
-            )
-        if knowledge_base_examples:
-            reference_text += "\n\nContoh paling relevan dari Knowledge Base:\n"
-            reference_text += "\n\n".join(
-                f"Contoh {i}:\n{text}"
-                for i, text in enumerate(knowledge_base_examples, start=1)
-            )
-
-        by_ref = {slide["ref"]: slide for slide in deck["items"]}
-        generated = []
-        total_chapters = len(chapters)
-        logger.info("Writing dimulai: %s bab", total_chapters)
-        _report(progress_callback, "writing", "running", "", 0, total_chapters)
-        for index, chapter in enumerate(chapters, start=1):
-            _report(progress_callback, "writing", "running", chapter, index - 1, total_chapters)
-            refs = mapping[chapter]
-            logger.debug("Bab %s/%s '%s': %s slide (%s)", index, total_chapters, chapter, len(refs), refs)
-            if not refs:
-                generated.append({"title": chapter, "html": "", "slide_refs": []})
-                _report(progress_callback, "writing", "running", chapter, index, total_chapters)
-                continue
-            materials = "\n\n".join(self._slide_text(by_ref[ref]) for ref in refs)
-            html = self._converse(
-                [
-                    {
-                        "text": (
-                            "Susun isi untuk SATU bab berikut sebagai HTML fragment yang siap ditempel ke CKEditor. "
-                            "Gunakan hanya tag h2, h3, p, ul, ol, li, table, thead, tbody, tr, th, td, strong, em. "
-                            "Jangan keluarkan html/head/body, markdown, CSS, atau komentar. Jangan mengarang fakta, "
-                            "angka, kutipan, maupun sumber yang tidak ada di materi. Pertahankan semua angka penting "
-                            "dan makna tabel. Gunakan bahasa Indonesia formal, jelas, dan konsisten. "
-                            f"Judul bab harus tepat: {chapter}. Mulai dengan <h2>{chapter}</h2>. "
-                            "Jika isi slide tidak relevan, jangan mengisinya dengan materi rekaan."
-                            f"{reference_text}\n\nMateri bab:\n{materials}"
-                        )
-                    }
-                ],
-                max_tokens=6000,
-                step="writing",
-            )
-            html = re.sub(r"^\s*```(?:html)?\s*|\s*```\s*$", "", html, flags=re.IGNORECASE)
-            html = bleach.clean(
-                html,
-                tags=ALLOWED_HTML_TAGS,
-                attributes={},
-                strip=True,
-            )
-            images_html = self._chapter_images_html(deck, refs)
-            if images_html:
-                html = f"{html}\n{images_html}" if html else images_html
-            generated.append(
-                {"title": chapter, "html": html, "slide_refs": refs}
-            )
-            logger.debug("Bab %s/%s '%s' selesai: %s karakter HTML", index, total_chapters, chapter, len(html))
-            _report(progress_callback, "writing", "running", chapter, index, total_chapters)
-        logger.info("Writing selesai: %s bab", total_chapters)
-        _report(progress_callback, "writing", "done", "", total_chapters, total_chapters)
-        return {
-            "filename": deck["filename"],
-            "chapters": generated,
-            "html": "\n".join(ch["html"] for ch in generated if ch["html"]),
-        }
-
-    def correct_fragment(
-        self,
-        chapter: str,
-        materials: str,
-        reference_text: str,
-        selected_html: str,
-    ) -> str:
-        """Koreksi satu potongan HTML yang diseleksi user (fitur 'Part Document').
-        Tidak mengubah logika generate() / generate_from_mapping() yang sudah ada."""
-        prompt = (
-            "Berikut potongan HTML yang dipilih user dari sebuah dokumen, untuk DIKOREKSI. "
-            "Perbaiki berdasarkan dua hal: (1) materi slide asli di bawah — betulkan fakta, angka, atau "
-            "data yang salah maupun kurang dibanding materi asli; (2) contoh referensi di bawah (jika ada) — "
-            "selaraskan gaya bahasa dan struktur penulisan supaya konsisten dengannya. "
-            "JANGAN mengubah makna di luar yang didukung materi, JANGAN menambah isi rekaan, "
-            "JANGAN keluarkan markdown atau komentar. Gunakan hanya tag h2, h3, p, ul, ol, li, table, "
-            "thead, tbody, tr, th, td, strong, em. Kembalikan HANYA HTML hasil koreksi untuk potongan ini saja.\n"
-            f"Bab terkait: {chapter}\n\n"
-            f"Materi slide asli:\n{materials}"
-            f"{reference_text}\n\n"
-            f"Potongan HTML yang perlu dikoreksi:\n{selected_html}"
-        )
-        logger.info("Correct fragment bab '%s': input=%s karakter", chapter, len(selected_html))
-        html = self._converse([{"text": prompt}], max_tokens=4000, step="writing")
-        html = re.sub(r"^\s*```(?:html)?\s*|\s*```\s*$", "", html, flags=re.IGNORECASE)
-        html = bleach.clean(html, tags=ALLOWED_HTML_TAGS, attributes={}, strip=True)
-        logger.info("Correct fragment bab '%s': output=%s karakter", chapter, len(html))
-        return html
-
     NARRATION_MAX_ATTEMPTS = 2
     NARRATION_BATCH_SLIDES = 5
     NARRATION_BATCH_FACT_CHARS = 5000
@@ -789,113 +586,3 @@ class BedrockDocumentGenerator:
             return style_guide.validate_guide(guide, samples)
         except style_guide.StyleGuideError as exc:
             raise BedrockError(f"Panduan gaya dari model tidak valid: {exc}. Coba lagi.") from exc
-
-    def retrieve_kb_materials(self, query_text: str, number_of_results: int = 5) -> list[str]:
-        """Ambil materi PPT relevan dari Knowledge Base berdasarkan teks query bebas
-        (tidak terikat struktur deck). Dipakai fitur koreksi HTML lepas dari KB."""
-        if not self.knowledge_base_client or not self.knowledge_base_id:
-            return []
-        try:
-            response = self.knowledge_base_client.retrieve(
-                knowledgeBaseId=self.knowledge_base_id,
-                retrievalQuery={"text": query_text[:4000]},
-                retrievalConfiguration={
-                    "managedSearchConfiguration": {"numberOfResults": number_of_results}
-                },
-            )
-        except (BotoCoreError, ClientError) as exc:
-            message = str(exc)
-            if isinstance(exc, ClientError):
-                message = exc.response.get("Error", {}).get("Message", message)
-            logger.error("Retrieve KB (koreksi HTML) ERROR: %s", message)
-            raise BedrockError(f"Gagal mengambil materi dari Knowledge Base: {message}") from exc
-        materials = []
-        for result in response.get("retrievalResults", []):
-            text = result.get("content", {}).get("text", "").strip()
-            if text:
-                materials.append(text[:10000])
-        logger.info("Retrieve KB (koreksi HTML) selesai: %s materi ditemukan", len(materials))
-        return materials
-
-    @staticmethod
-    def _extract_inline_images(html: str) -> tuple[str, list[dict[str, Any]]]:
-        """Pisahkan gambar base64 inline (hasil insert di CKEditor) dari teks HTML.
-        Setiap <img> diganti placeholder [Gambar N] di teks supaya prompt tidak
-        membengkak oleh data base64; bytes-nya dikirim terpisah sebagai blok
-        image multimodal ke model. Dipakai khusus fitur 'KB Correction'."""
-        images: list[dict[str, Any]] = []
-
-        def _replace(match: re.Match[str]) -> str:
-            if len(images) >= MAX_KB_CORRECTION_IMAGES:
-                return ""
-            fmt = INLINE_IMAGE_FORMATS.get(match.group("fmt").lower())
-            if not fmt:
-                return ""
-            try:
-                raw = base64.b64decode(match.group("data"))
-            except ValueError:
-                return ""
-            if not raw or len(raw) > MAX_IMAGE_BYTES:
-                logger.warning("Gambar KB Correction dilewati: %s bytes", len(raw))
-                return ""
-            images.append({"format": fmt, "bytes": raw, "tag": match.group(0)})
-            return f"[Gambar {len(images)}]"
-
-        text = INLINE_IMAGE_RE.sub(_replace, html)
-        return text, images
-
-    def correct_fragment_from_kb(self, materials: str, selected_html: str) -> dict[str, Any]:
-        """Koreksi HTML berdasarkan materi KB, sekaligus minta model merinci poin
-        perubahan yang dilakukan supaya bisa ditampilkan ke user. Gambar yang
-        disisipkan user di CKEditor ikut dikirim ke model (vision) supaya narasi
-        bisa disusun/dikoreksi sesuai isi gambar. Dipakai khusus fitur
-        'KB Correction' — tidak memengaruhi correct_fragment() yang sudah ada."""
-        allowed_tags = ", ".join(sorted(ALLOWED_HTML_TAGS))
-        text_html, images = self._extract_inline_images(selected_html)
-        image_note = (
-            "Potongan ini menyertakan gambar yang ditandai [Gambar N] pada posisinya. "
-            "WAJIB: tulis narasi/penjelasan berdasarkan isi gambar tersebut (apa yang "
-            "ditampilkan, data atau informasi pentingnya) sebagai teks biasa (tag p/ul/li) "
-            "di posisi yang sama. JANGAN menyalin tulisan '[Gambar N]' apa adanya ke "
-            "corrected_html — itu hanya penanda posisi untuk Anda, bukan konten yang "
-            "harus dipertahankan. Jika gambar ada di dalam table maka sertakan penjelasan di dalam cell berikutnya pada row yang sama sehingga sehingga penjelasan ada di sebelah kanan gambarnya dengan proporsi lebar cell gambar 50% dan 50% penjelasan \n"
-            if images else ""
-        )
-        prompt = (
-            "Berikut potongan HTML yang diupload user, KOREKSI fakta, angka, atau data yang salah maupun "
-            "kurang berdasarkan potongan HTML saja, jika tidak ada informasi pendukung pada HTML potongan maka jangan diperbaiki, gaya penulisan ikuti gaya HTML dan Knowledge Base yang ada.  JANGAN mengubah makna di luar yang didukung materi pada potongan HTML, JANGAN menambah "
-            "isi rekaan. Kalau tidak ada yang perlu dikoreksi, kembalikan HTML asli apa adanya dan array "
-            "changes kosong.\n"
-            + image_note +
-            "Kembalikan HANYA objek JSON (tanpa markdown/komentar) dengan format tepat:\n"
-            '{"corrected_html": "<HTML hasil koreksi, hanya tag ' + allowed_tags + '>", '
-            '"changes": ["ringkasan singkat satu perubahan", "..."]}\n\n'
-            f"Materi PPT dari Knowledge Base:\n{materials}\n\n"
-            f"Potongan HTML yang perlu dikoreksi:\n{text_html}"
-        )
-        content: list[dict[str, Any]] = [{"text": prompt}]
-        for image in images:
-            content.append({"image": {"format": image["format"], "source": {"bytes": image["bytes"]}}})
-        logger.info("Correct fragment (KB): input=%s karakter, %s gambar", len(selected_html), len(images))
-        response = self._converse(content, max_tokens=4000, step="kb")
-        parsed = self._parse_json(response, context="hasil koreksi KB")
-        html = parsed.get("corrected_html", "")
-        if not isinstance(html, str):
-            raise BedrockError("Format HTML hasil koreksi dari model tidak valid.")
-        html = re.sub(r"^\s*```(?:html)?\s*|\s*```\s*$", "", html, flags=re.IGNORECASE)
-        html = bleach.clean(html, tags=ALLOWED_HTML_TAGS, attributes={}, strip=True)
-        leftover_images = []
-        for index, image in enumerate(images, start=1):
-            placeholder = f"[Gambar {index}]"
-            if placeholder in html:
-                html = html.replace(placeholder, image["tag"])
-            else:
-                leftover_images.append(image)
-        if leftover_images:
-            images_html = "\n".join(image["tag"] for image in leftover_images)
-            html = f"{html}\n{images_html}" if html else images_html
-        changes = parsed.get("changes", [])
-        if not isinstance(changes, list) or any(not isinstance(c, str) for c in changes):
-            changes = []
-        logger.info("Correct fragment (KB): output=%s karakter, %s perubahan", len(html), len(changes))
-        return {"html": html, "changes": changes}

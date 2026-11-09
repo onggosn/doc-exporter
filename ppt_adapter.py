@@ -7,7 +7,7 @@ LibreOffice supaya bisa dideskripsikan model multimodal.
 Pemakaian:
     python ppt_adapter.py deck.pptx --source-id ppt-001 --render-dir out/png > deck.json
 
-Dependensi: pip install python-pptx ; (opsional) LibreOffice + pdftoppm (poppler).
+Dependensi: pip install python-pptx ; (opsional) LibreOffice + pymupdf.
 """
 from __future__ import annotations
 
@@ -165,14 +165,30 @@ def extract_slide(slide, index: int) -> dict:
     }
 
 
+def find_soffice() -> Optional[str]:
+    return shutil.which("soffice") or shutil.which("libreoffice")
+
+
+def can_render_slides() -> bool:
+    """True bila render slide ke PNG memungkinkan (LibreOffice + PyMuPDF)."""
+    if not find_soffice():
+        return False
+    try:
+        import pymupdf  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def render_slides_png(pptx_path: Path, out_dir: Path, dpi: int = 110) -> dict[int, Path]:
-    """PPTX -> PDF (LibreOffice) -> PNG per slide (pdftoppm). Return {nomor_slide: path}."""
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
-    pdftoppm = shutil.which("pdftoppm")
-    if not soffice or not pdftoppm:
-        raise RuntimeError("Butuh LibreOffice (soffice) dan poppler (pdftoppm) untuk render PNG")
+    """PPTX -> PDF (LibreOffice) -> PNG per slide (PyMuPDF). Return {nomor_slide: path}."""
+    soffice = find_soffice()
+    if not can_render_slides():
+        raise RuntimeError("Butuh LibreOffice (soffice) dan PyMuPDF (pip install pymupdf) untuk render PNG")
+    import pymupdf
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    result: dict[int, Path] = {}
     with tempfile.TemporaryDirectory() as tmp:
         # Profil LibreOffice per-konversi di direktori temp: aman untuk container
         # non-root (OpenShift) dan mencegah konflik lock antar konversi paralel.
@@ -183,15 +199,11 @@ def render_slides_png(pptx_path: Path, out_dir: Path, dpi: int = 110) -> dict[in
             check=True, capture_output=True, timeout=300,
         )
         pdf = Path(tmp) / (pptx_path.stem + ".pdf")
-        prefix = out_dir / pptx_path.stem
-        subprocess.run(
-            [pdftoppm, "-png", "-r", str(dpi), str(pdf), str(prefix)],
-            check=True, capture_output=True, timeout=300,
-        )
-
-    result = {}
-    for png in sorted(out_dir.glob(f"{pptx_path.stem}-*.png")):
-        result[int(png.stem.rsplit("-", 1)[1])] = png  # pdftoppm menambah nomor halaman
+        with pymupdf.open(pdf) as doc:
+            for index, page in enumerate(doc, start=1):
+                png = out_dir / f"{pptx_path.stem}-{index}.png"
+                page.get_pixmap(dpi=dpi).save(png)
+                result[index] = png
     return result
 
 

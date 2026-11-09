@@ -8,23 +8,9 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 .app-shell { display: flex; min-height: 100vh; }
-.sidebar {
-  width: 220px; flex-shrink: 0; background: #0f2b28; padding: 28px 16px;
-  display: flex; flex-direction: column; gap: 6px;
-}
-.sidebar .eyebrow { color: #7fd9ce; padding: 0 10px 14px; }
-.sidebar .nav-item {
-  display: block; width: 100%; text-align: left; border: 0; background: none;
-  color: #c9d8d6; padding: 11px 12px; border-radius: 8px; font: inherit; font-weight: 650;
-  cursor: pointer;
-}
-.sidebar .nav-item:hover { background: #163d38; }
-.sidebar .nav-item.active { background: #087e75; color: white; }
 .layout { max-width: 900px; margin: 0 auto; padding: 44px 24px 72px; flex: 1; min-width: 0; }
 @media (max-width: 760px) {
   .app-shell { flex-direction: column; }
-  .sidebar { width: 100%; flex-direction: row; overflow-x: auto; padding: 14px 12px; }
-  .sidebar .eyebrow { display: none; }
 }
 header { margin-bottom: 28px; }
 .eyebrow { color: #087e75; font-size: .76rem; font-weight: 800; letter-spacing: .12em; }

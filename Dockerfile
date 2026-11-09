@@ -1,12 +1,12 @@
 FROM registry.access.redhat.com/ubi9/python-311:latest
 
 USER 0
-# LibreOffice (PPTX -> PDF) dan Poppler (PDF -> PNG) untuk render slide visual.
+# LibreOffice (PPTX -> PDF) untuk render slide visual; PDF -> PNG memakai PyMuPDF (pip).
 # Jika repo EPEL/Debian diperlukan untuk libreoffice di base image Anda, gunakan
 # base image Debian (python:3.11-slim) dengan:
-#   apt-get install -y --no-install-recommends libreoffice-impress poppler-utils fonts-liberation
+#   apt-get install -y --no-install-recommends libreoffice-impress fonts-liberation
 RUN dnf install -y --setopt=install_weak_deps=False \
-        libreoffice-impress poppler-utils liberation-fonts dejavu-sans-fonts \
+        libreoffice-impress liberation-fonts dejavu-sans-fonts \
     && dnf clean all
 
 WORKDIR /app

@@ -7,14 +7,12 @@ from botocore.exceptions import ClientError
 import threading
 import time
 
-from bedrock_service import BedrockDocumentGenerator, BedrockError, run_parallel
+from bedrock_service import BEDROCK_CLIENT_CONFIG, BedrockDocumentGenerator, BedrockError, run_parallel
 
 
 class BedrockDocumentGeneratorTests(unittest.TestCase):
     def setUp(self):
         self.generator = object.__new__(BedrockDocumentGenerator)
-        self.generator.knowledge_base_client = None
-        self.generator.knowledge_base_id = None
 
     def test_requires_region_when_not_configured(self):
         session = Mock(region_name=None)
@@ -36,7 +34,9 @@ class BedrockDocumentGeneratorTests(unittest.TestCase):
             generator = BedrockDocumentGenerator()
 
         self.assertEqual(generator.region, "eu-west-1")
-        session.client.assert_called_once_with("bedrock-runtime", region_name="eu-west-1")
+        session.client.assert_called_once_with(
+            "bedrock-runtime", region_name="eu-west-1", config=BEDROCK_CLIENT_CONFIG
+        )
 
     def test_sets_session_region_for_login_credential_refresh(self):
         for region, environment, expected in (
@@ -50,14 +50,11 @@ class BedrockDocumentGeneratorTests(unittest.TestCase):
                     patch.dict("os.environ", environment, clear=True),
                     patch("bedrock_service.boto3.Session", return_value=session) as factory,
                 ):
-                    generator = BedrockDocumentGenerator(
-                        region=region, knowledge_base_id="kb-test"
-                    )
+                    generator = BedrockDocumentGenerator(region=region)
 
                 factory.assert_called_once_with(region_name=expected)
                 self.assertEqual(generator.region, expected)
                 self.assertEqual(session.client.call_args_list[0].kwargs["region_name"], expected)
-                self.assertEqual(session.client.call_args_list[1].kwargs["region_name"], expected)
 
     def test_includes_region_in_bedrock_request_error(self):
         self.generator.model_id = "test-model"
@@ -70,94 +67,6 @@ class BedrockDocumentGeneratorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BedrockError, r"Region: us-east-1.*request failed"):
             self.generator._converse([{"text": "hello"}])
-
-    def test_generates_chapter_html_and_removes_unsafe_markup(self):
-        self.generator._converse = Mock(
-            side_effect=[
-                '{"Bab 1 - Pendahuluan": ["slide-1"], "Bab 2 - Penutup": []}',
-                '<h2>Bab 1 - Pendahuluan</h2><p>Ringkasan.</p><script>alert(1)</script>',
-            ]
-        )
-        deck = {
-            "filename": "presentasi.pptx",
-            "items": [
-                {
-                    "ref": "slide-1",
-                    "title": "Tujuan",
-                    "text": ["Meningkatkan mutu layanan"],
-                    "tables": [],
-                    "charts": [],
-                    "notes": "",
-                }
-            ],
-        }
-
-        result = self.generator.generate(
-            deck, ["Bab 1 - Pendahuluan", "Bab 2 - Penutup"], []
-        )
-
-        self.assertEqual(result["filename"], "presentasi.pptx")
-        self.assertEqual(len(result["chapters"]), 2)
-        self.assertEqual(result["chapters"][0]["slide_refs"], ["slide-1"])
-        self.assertEqual(result["chapters"][1]["html"], "")
-        self.assertIn("<p>Ringkasan.</p>", result["html"])
-        self.assertNotIn("<script>", result["html"])
-
-    def test_rejects_incomplete_or_duplicate_slide_mapping(self):
-        self.generator._converse = Mock(
-            return_value='{"Bab 1": ["slide-1"], "Bab 2": ["slide-1"]}'
-        )
-        deck = {
-            "filename": "presentasi.pptx",
-            "items": [
-                {
-                    "ref": "slide-1",
-                    "title": "",
-                    "text": ["Konten"],
-                    "tables": [],
-                    "charts": [],
-                    "notes": "",
-                }
-            ],
-        }
-
-        with self.assertRaisesRegex(BedrockError, "tidak lengkap|duplikat"):
-            self.generator.generate(deck, ["Bab 1", "Bab 2"], [])
-
-    def test_retrieves_relevant_knowledge_base_examples(self):
-        client = Mock()
-        client.retrieve.return_value = {
-            "retrievalResults": [
-                {"content": {"text": "Contoh struktur laporan yang relevan"}}
-            ]
-        }
-        self.generator.knowledge_base_client = client
-        self.generator.knowledge_base_id = "kb-test"
-        self.generator._converse = Mock(
-            side_effect=[
-                '{"Bab 1": ["slide-1"]}',
-                "<h2>Bab 1</h2><p>Hasil.</p>",
-            ]
-        )
-        deck = {
-            "filename": "presentasi.pptx",
-            "items": [
-                {
-                    "ref": "slide-1",
-                    "title": "Tujuan",
-                    "text": ["Meningkatkan mutu layanan"],
-                    "tables": [],
-                    "charts": [],
-                    "notes": "",
-                }
-            ],
-        }
-
-        self.generator.generate(deck, ["Bab 1"], [])
-
-        client.retrieve.assert_called_once()
-        prompt = self.generator._converse.call_args_list[1].args[0][0]["text"]
-        self.assertIn("Contoh struktur laporan yang relevan", prompt)
 
 
 class ParseJsonTests(unittest.TestCase):

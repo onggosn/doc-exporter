@@ -1,6 +1,6 @@
 # PPT ke Dokumen
 
-Aplikasi web Flask untuk mengekstrak konten PowerPoint, menyusunnya menjadi dokumen HTML per bab melalui Amazon Bedrock Converse API, dan mengedit hasilnya di CKEditor.
+Aplikasi web Flask yang mengubah PowerPoint (.pptx) menjadi dokumen Word (.docx). Konten slide diekstrak, dipetakan ke bab dan ditulis menjadi narasi lewat Amazon Bedrock Converse API, lalu dirakit menjadi DOCX mengikuti format profil jenis dokumen.
 
 ## Persiapan
 
@@ -12,7 +12,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Untuk mendeskripsikan gambar dan grafik dari slide secara visual, pasang LibreOffice serta Poppler (`soffice` dan `pdftoppm`) pada mesin yang menjalankan aplikasi. Tanpa keduanya, teks, tabel, notes, dan data chart tetap diekstrak, tetapi tidak ada deskripsi visual untuk slide.
+Untuk mendeskripsikan gambar dan grafik dari slide secara visual, pasang LibreOffice (`soffice`) pada mesin yang menjalankan aplikasi. Tanpa LibreOffice dan PyMuPDF, teks, tabel, notes, dan data chart tetap diekstrak, tetapi tidak ada deskripsi visual untuk slide.
 
 ## Jalankan
 
@@ -75,20 +75,9 @@ HOST=127.0.0.1 PORT=5003 MAX_UPLOAD_MB=1000 .venv/bin/python app.py
 
 Lihat nama profil yang tersedia dengan `aws configure list-profiles`.
 
-## Alur
-
-1. Unggah PPTX utama dan tentukan judul bab, satu per baris.
-2. Opsional, unggah hingga dua pasangan PPTX dan dokumen final UTF-8 (`.html` atau `.txt`) untuk contoh gaya.
-   Jika materi contoh lebih banyak, isi Knowledge Base ID agar tiga potongan paling relevan diambil melalui Bedrock Knowledge Bases.
-3. Aplikasi mengekstrak teks, tabel, speaker notes, dan data chart. Jika LibreOffice dan Poppler tersedia, slide visual dirender untuk dideskripsikan lewat model multimodal.
-4. Bedrock memetakan slide ke bab, lalu membuat HTML per bab.
-5. Tinjau/edit hasil di CKEditor; unduh dokumen HTML ketika siap.
-
-Dokumen final referensi dikirim ke model sebagai contoh gaya, jadi jangan unggah dokumen yang berisi informasi rahasia. File unggahan sementara dihapus setelah pemrosesan.
-
 ## PPT ke DOCX
 
-Menu **PPT → DOCX** membuat dokumen Word dari PPT dengan format, gaya, dan susunan gambar yang meniru dokumen referensi. Fakta hanya berasal dari PPT; format dan gaya berasal dari *profil* jenis dokumen.
+Aplikasi ini membuat dokumen Word dari PPT dengan format, gaya, dan susunan gambar yang meniru dokumen referensi. Fakta hanya berasal dari PPT; format dan gaya berasal dari *profil* jenis dokumen.
 
 ### Alur kerja (sequence diagram)
 
@@ -235,7 +224,7 @@ Kesalahan dikembalikan sebagai `{"error": "..."}` dengan kode 400 (permintaan ti
 
 ### Profil jenis dokumen dan pengaturan
 
-Bangun profil sekali per jenis dokumen dari HTML referensi (hasil CKEditor) dan, bila ada, PDF-nya:
+Bangun profil sekali per jenis dokumen dari HTML referensi dan, bila ada, PDF-nya:
 
 ```bash
 .venv/bin/python profile_builder.py referensi/*.html --pdf referensi/*.pdf --name dokumen-2d --title "Dokumen 2d"
@@ -253,13 +242,13 @@ Langkah yang memanggil model per slide atau per bab (deskripsi visual, pemetaan 
 
 Narasi yang ditulis model selalu berupa paragraf, tanpa bullet dan penomoran; bullet hanya muncul pada teks yang dibawa apa adanya dari slide (bab kesimpulan/arahan, "Hasil Pembahasan Dewan Gubernur", "Key Takeaways"). Semua tabel di DOCX memakai border solid 1 pt.
 
-Pemakaian waktu dan token fitur lain juga dicatat ke `document_processing_log` dengan penanda di nama dokumen: `[KB Correction]`, `[Part Document: koreksi bagian]`, `<berkas> [Mapping manual]` (satu baris per sesi, saat finalisasi), dan `<profil> [Panduan gaya]`. Token koreksi KB masuk ke kolom `kb_*`; token penulisan, koreksi, dan panduan gaya ke `writing_*`.
+Pembuatan panduan gaya juga dicatat ke `document_processing_log` dengan penanda `<profil> [Panduan gaya]`; tokennya masuk ke kolom `writing_*`.
 
-Setiap pembuatan DOCX, berhasil atau gagal, mencatat durasi dan jumlah token per langkah ke tabel `document_processing_log` lewat fungsi yang sama dengan alur dokumen HTML. Nama dokumen diberi akhiran `[PPT→DOCX]` untuk membedakannya. Token narasi masuk ke kolom `writing_*`; langkah perakitan tidak punya kolom sendiri tetapi termasuk di `total_seconds`, dan kolom `kb_*` kosong. 
+Setiap pembuatan DOCX, berhasil atau gagal, mencatat durasi dan jumlah token per langkah ke tabel `document_processing_log` lewat `_log_processing_times`. Nama dokumen diberi akhiran `[PPT→DOCX]` untuk membedakannya. Token narasi masuk ke kolom `writing_*`; langkah perakitan tidak punya kolom sendiri tetapi termasuk di `total_seconds`, dan kolom `kb_*` kosong. 
 
 Cara kerja pembuatan DOCX:
 
-- Slide bergambar, chart, diagram, dan tabel dirender menjadi gambar (butuh LibreOffice dan Poppler). Slide teks menjadi paragraf.
+- Slide bergambar, chart, diagram, dan tabel dirender menjadi gambar (butuh LibreOffice dan PyMuPDF). Slide teks menjadi paragraf.
 - Model hanya menulis narasi tiap slide. Layout, caption, dan nomor ditentukan kode dari profil.
 - Angka di narasi diperiksa terhadap isi slide asalnya; yang tidak ditemukan dilaporkan di panel hasil. Pemeriksaan ini tidak menangkap tafsiran yang tidak tertulis di slide, jadi narasi tetap perlu ditinjau.
 - Font dokumen mengikuti HTML referensi (Frutiger 45 Light, 11 pt); font itu harus terpasang di komputer pembuka. Watermark belum dipasang.
@@ -268,7 +257,6 @@ Cara kerja pembuatan DOCX:
 ## Konfigurasi
 
 - `BEDROCK_MODEL_ID`: default `us.anthropic.claude-opus-4-5-20251101-v1:0`, inference profile US untuk Claude Opus 4.5. Model ini memerlukan inference profile, bukan ID foundation model langsung. Permintaan dapat diproses di `us-east-1`, `us-east-2`, atau `us-west-2`, mengikuti izin IAM dan SCP organisasi. Dapat diganti melalui environment atau formulir.
-- `BEDROCK_KNOWLEDGE_BASE_ID`: ID Knowledge Base untuk retrieval contoh gaya, opsional; izin IAM `bedrock:Retrieve` diperlukan.
 - `AWS_REGION` atau `AWS_DEFAULT_REGION`: region AWS; jika tidak diset, aplikasi menggunakan region dari AWS profile. Region juga dapat diisi pada formulir.
   Region diterapkan pada sesi AWS serta klien Bedrock agar pembaruan kredensial `aws login` juga memiliki region.
 - `MAX_UPLOAD_MB`: batas ukuran request, default 100 MB.

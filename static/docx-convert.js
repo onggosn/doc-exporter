@@ -1,5 +1,4 @@
 (() => {
-  const navButton = document.querySelector("#nav-docx-convert");
   const select = document.querySelector("#docx-profile-select");
   const summary = document.querySelector("#docx-profile-summary");
   const body = document.querySelector("#docx-profile-body");
@@ -763,7 +762,5 @@
     }
   });
 
-  navButton.addEventListener("click", () => {
-    if (!listLoaded) loadList();
-  });
+  if (!listLoaded) loadList();
 })();
