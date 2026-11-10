@@ -242,9 +242,9 @@ Langkah yang memanggil model per slide atau per bab (deskripsi visual, pemetaan 
 
 Narasi yang ditulis model selalu berupa paragraf, tanpa bullet dan penomoran; bullet hanya muncul pada teks yang dibawa apa adanya dari slide (bab kesimpulan/arahan, "Hasil Pembahasan Dewan Gubernur", "Key Takeaways"). Semua tabel di DOCX memakai border solid 1 pt.
 
-Pembuatan panduan gaya juga dicatat ke `document_processing_log` dengan penanda `<profil> [Panduan gaya]`; tokennya masuk ke kolom `writing_*`.
+Pembuatan panduan gaya juga dicatat ke tabel log yang sama dengan penanda `<profil> [Panduan gaya]`; tokennya masuk ke kolom `writing_*`.
 
-Setiap pembuatan DOCX, berhasil atau gagal, mencatat durasi dan jumlah token per langkah ke tabel `document_processing_log` lewat `_log_processing_times`. Nama dokumen diberi akhiran `[PPT→DOCX]` untuk membedakannya. Token narasi masuk ke kolom `writing_*`; langkah perakitan tidak punya kolom sendiri tetapi termasuk di `total_seconds`, dan kolom `kb_*` kosong. 
+Setiap pembuatan DOCX, berhasil atau gagal, mencatat durasi dan jumlah token per langkah ke tabel `document_processing_log_v2` lewat `_log_processing_times`. Buat tabelnya sekali dengan `psql -d <database> -f db/schema.sql`; nama tabel bisa diganti lewat env `PROCESSING_LOG_TABLE`. Nama dokumen diberi akhiran `[PPT→DOCX]` untuk membedakannya. Kolomnya per langkah: `ingest_*`, `visuals_*` (deskripsi visual), `captions_*` (ringkasan gambar untuk caption), `mapping_*`, dan `writing_*` (narasi bab dan panduan gaya), masing-masing berisi `seconds`, `at`, `input_tokens`, `output_tokens`. Langkah perakitan tidak punya kolom sendiri tetapi termasuk di `total_seconds`. 
 
 Cara kerja pembuatan DOCX:
 
@@ -259,6 +259,8 @@ Cara kerja pembuatan DOCX:
 - `BEDROCK_MODEL_ID`: default `us.anthropic.claude-opus-4-5-20251101-v1:0`, inference profile US untuk Claude Opus 4.5. Model ini memerlukan inference profile, bukan ID foundation model langsung. Permintaan dapat diproses di `us-east-1`, `us-east-2`, atau `us-west-2`, mengikuti izin IAM dan SCP organisasi. Dapat diganti melalui environment atau formulir.
 - `AWS_REGION` atau `AWS_DEFAULT_REGION`: region AWS; jika tidak diset, aplikasi menggunakan region dari AWS profile. Region juga dapat diisi pada formulir.
   Region diterapkan pada sesi AWS serta klien Bedrock agar pembaruan kredensial `aws login` juga memiliki region.
+- `CAPTION_FACTS_MAX_CHARS`: batas karakter teks slide yang dikirim bersama gambar untuk ringkasan caption, default 1500; `0` mengirim semuanya. Mengurangi token karena teks slide tidak terkirim penuh di setiap panel. Pemeriksaan angka tetap memakai teks lengkap.
+- `MAPPING_TEXT_MAX_CHARS`: batas karakter teks per slide pada prompt pemetaan slide ke bab, default 2000; `0` tanpa batas. Prompt pemetaan hanya memuat judul, awal teks, judul chart, header tabel, dan potongan deskripsi visual/notes; isi angka tabel dan chart tidak dikirim.
 - `MAX_UPLOAD_MB`: batas ukuran request, default 100 MB.
 - `UPLOAD_DIR`: direktori penyimpanan sementara, default `uploads/` di folder aplikasi.
 - `HOST` dan `PORT`: alamat server, default `127.0.0.1:5003`.

@@ -149,10 +149,10 @@ class DocxJobTests(unittest.TestCase):
         self.run_job(Tokens)
         name, status, timing, total_seconds, usage = self.log.call_args.args
         self.assertEqual((name, status), ("contoh.pptx [PPT→DOCX]", "done"))
-        self.assertEqual(set(timing), {"ingest", "visuals", "mapping", "kb", "writing"})
+        self.assertEqual(set(timing), {"ingest", "visuals", "captions", "mapping", "writing"})
         self.assertIsNotNone(timing["ingest"]["seconds"])
         self.assertIsNotNone(timing["visuals"]["at"])
-        self.assertIsNone(timing["kb"]["seconds"])
+        self.assertEqual(timing["captions"]["seconds"], 0)  # dilewati (tanpa gambar), tetap tercatat sendiri
         self.assertGreaterEqual(total_seconds, 0)
         self.assertEqual(usage, {"visuals": {"input_tokens": 10, "output_tokens": 2},
                                  "mapping": {"input_tokens": 30, "output_tokens": 4},

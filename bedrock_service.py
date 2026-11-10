@@ -87,6 +87,7 @@ def run_parallel(items, worker, workers=1, stop_on_error=True, on_done=None):
 
 DEFAULT_MODEL_ID = "global.anthropic.claude-opus-4-6-v1"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+DEFAULT_MAPPING_TEXT_MAX_CHARS = 2000  # teks per slide pada prompt pemetaan; env MAPPING_TEXT_MAX_CHARS
 
 class BedrockError(RuntimeError):
     """Bedrock request or response error safe to show in the UI."""
@@ -232,52 +233,95 @@ class BedrockDocumentGenerator:
         self, deck: dict[str, Any], progress_callback: ProgressCallback | None = None,
         skip_refs: set[str] | frozenset[str] = frozenset(),
     ) -> None:
-        """Ringkas tiap gambar yang dipasang di dokumen untuk caption: tiap panel pada slide yang dipecah,
-        atau slide utuh. Slide di `skip_refs` (mis. bab kesimpulan/arahan) tidak diringkas."""
-        tasks: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        """Ringkas tiap gambar yang dipasang di dokumen untuk caption: tiap panel pada slide yang dipecah
+        (satu panggilan per slide, teks slide dikirim sekali), atau slide utuh. Slide di `skip_refs`
+        (mis. bab kesimpulan/arahan) tidak diringkas."""
+        tasks: list[tuple[dict[str, Any], list[dict[str, Any]] | None]] = []
         for slide in deck["items"]:
             if not slide.get("image_path") or slide["ref"] in skip_refs:
                 continue
             panels = slide.get("panel_images") or []
-            tasks += [(slide, panel) for panel in panels] if len(panels) >= 2 else [(slide, None)]
+            tasks.append((slide, panels if len(panels) >= 2 else None))
         if not tasks:
             _report(progress_callback, "captions", "skipped", "Tidak ada gambar untuk diringkas", 0, 0)
             return
-        total = len(tasks)
+        weights = [len(panels) if panels else 1 for _slide, panels in tasks]  # progres dihitung per gambar
+        total = sum(weights)
         _report(progress_callback, "captions", "running", "", 0, total)
 
-        def run(task: tuple[dict[str, Any], dict[str, Any] | None]) -> None:
-            slide, panel = task
-            target = panel if panel is not None else slide
-            image = Path(target["image_path"]).read_bytes()
+        def run(task: tuple[dict[str, Any], list[dict[str, Any]] | None]) -> None:
+            slide, panels = task
+            if panels:
+                self.summarize_panels(slide, panels)
+                return
+            image = Path(slide["image_path"]).read_bytes()
             if len(image) > MAX_IMAGE_BYTES:
                 logger.warning("Ringkasan %s dilewati: gambar %s bytes > batas", slide["ref"], len(image))
                 return
-            target["summary"], target["summary_flagged"] = self.summarize_image(image, slide, (panel or {}).get("header"))
+            slide["summary"], slide["summary_flagged"] = self.summarize_image(image, slide, None)
 
         finished = 0
 
-        def advance(_index: int, _outcome: Any) -> None:
+        def advance(index: int, _outcome: Any) -> None:
             nonlocal finished
-            finished += 1
+            finished += weights[index]
             _report(progress_callback, "captions", "running", "", finished, total)
 
         run_parallel(tasks, run, self.workers, on_done=advance)
         _report(progress_callback, "captions", "done", "", total, total)
+
+    def summarize_panels(self, slide: dict[str, Any], panels: list[dict[str, Any]]) -> None:
+        """Ringkas semua panel satu slide dalam satu panggilan, supaya teks slide tidak terkirim berulang.
+        Panel yang ringkasannya kosong atau memuat angka yang tidak ada di slide diulang satu per satu
+        lewat `summarize_image` (yang punya satu kali retry sendiri); begitu pula seluruh panel bila
+        panggilan gabungan gagal atau bukan JSON yang valid."""
+        items: list[tuple[dict[str, Any], bytes]] = []
+        for panel in panels:
+            image = Path(panel["image_path"]).read_bytes()
+            if len(image) > MAX_IMAGE_BYTES:
+                logger.warning("Ringkasan %s dilewati: gambar %s bytes > batas", slide["ref"], len(image))
+                continue
+            items.append((panel, image))
+        facts = doc_composer.all_facts({**slide, "visual_desc": None})  # lengkap, untuk pemeriksaan angka
+        summaries: dict[int, str] = {}
+        if len(items) >= 2:
+            content: list[dict[str, Any]] = [{"text": doc_composer.panels_summary_prompt(
+                slide.get("title"), [panel.get("header") for panel, _ in items], doc_composer.trim_facts(facts)
+            )}]
+            for number, (panel, image) in enumerate(items, start=1):
+                content.append({"text": f"Panel {number}: {panel.get('header') or '(tanpa judul)'}"})
+                content.append({"image": {"format": "png", "source": {"bytes": image}}})
+            try:
+                parsed = self._parse_json(
+                    self._converse(content, max_tokens=min(300 * len(items) + 200, 3000), step="captions"),
+                    context="ringkasan panel",
+                )
+                for number in range(1, len(items) + 1):
+                    raw = parsed.get(str(number))
+                    if isinstance(raw, str):
+                        summaries[number] = doc_composer.clean_summary(raw)
+            except BedrockError as exc:
+                logger.warning("Ringkasan gabungan %s gagal, diulang per panel: %s", slide["ref"], exc)
+        for number, (panel, image) in enumerate(items, start=1):
+            summary = summaries.get(number)
+            if summary and not doc_composer.unsupported_numbers([summary], facts):
+                panel["summary"], panel["summary_flagged"] = summary, []
+            else:
+                panel["summary"], panel["summary_flagged"] = self.summarize_image(image, slide, panel.get("header"))
 
     def summarize_image(
         self, image: bytes, slide: dict[str, Any], header: str | None
     ) -> tuple[str, list[str]]:
         """Ringkasan 1-2 kalimat dari gambar itu sendiri untuk caption. Angka yang tidak ada di teks slide
         diminta dibuang sekali; yang tersisa dikembalikan sebagai peringatan."""
-        facts = doc_composer.all_facts({**slide, "visual_desc": None})
+        facts = doc_composer.all_facts({**slide, "visual_desc": None})  # lengkap, untuk pemeriksaan angka
         feedback = ""
         summary, numbers = "", []
         for attempt in range(2):
-            prompt = doc_composer.image_summary_prompt(slide.get("title"), header, facts, feedback)
+            prompt = doc_composer.image_summary_prompt(slide.get("title"), header, doc_composer.trim_facts(facts), feedback)
             summary = doc_composer.clean_summary(self._converse(
                 [{"text": prompt}, {"image": {"format": "png", "source": {"bytes": image}}}],
-                max_tokens=300, step="visuals",
+                max_tokens=300, step="captions",
             ))
             numbers = doc_composer.unsupported_numbers([summary], facts)
             if not numbers:
@@ -289,20 +333,38 @@ class BedrockDocumentGenerator:
         return summary, numbers
 
     @staticmethod
-    def _slide_text(slide: dict[str, Any]) -> str:
-        parts = [
-            f"Referensi: {slide['ref']}",
-            f"Judul: {slide.get('title') or '(tanpa judul)'}",
-            "Teks: " + " | ".join(slide.get("text", [])),
-        ]
-        if slide.get("tables"):
-            parts.append("Tabel: " + json.dumps(slide["tables"], ensure_ascii=False))
-        if slide.get("charts"):
-            parts.append("Data chart: " + json.dumps(slide["charts"], ensure_ascii=False))
+    def _mapping_text(slide: dict[str, Any]) -> str:
+        """Representasi ringkas slide khusus pemetaan ke bab: yang menentukan bab adalah topiknya, jadi cukup
+        judul, awal teks, judul chart dan nama seri, header tabel, serta potongan deskripsi visual dan notes.
+        Isi angka tabel dan chart tidak dikirim. Panjang teks diatur env MAPPING_TEXT_MAX_CHARS (0 = tanpa batas)."""
+        try:
+            limit = int(os.environ.get("MAPPING_TEXT_MAX_CHARS", DEFAULT_MAPPING_TEXT_MAX_CHARS))
+        except ValueError:
+            limit = DEFAULT_MAPPING_TEXT_MAX_CHARS
+
+        def cut(text: str, size: int) -> str:
+            text = " ".join(text.split())
+            if size <= 0 or len(text) <= size:
+                return text
+            return text[:size].rsplit(" ", 1)[0] + "…"
+
+        parts = [f"Referensi: {slide['ref']}", f"Judul: {slide.get('title') or '(tanpa judul)'}"]
+        body = cut(" | ".join(slide.get("text", [])), limit)
+        if body:
+            parts.append("Teks: " + body)
+        for chart in slide.get("charts") or []:
+            names = [chart.get("title", ""), *(str(item.get("name", "")) for item in chart.get("series", []))]
+            label = cut("; ".join(name for name in names if name), 200)
+            if label:
+                parts.append("Chart: " + label)
+        for table in slide.get("tables") or []:
+            header = cut(" ".join(str(cell) for cell in (table[0] if table else [])), 200)
+            if header:
+                parts.append("Header tabel: " + header)
         if slide.get("notes"):
-            parts.append("Speaker notes: " + slide["notes"])
+            parts.append("Speaker notes: " + cut(slide["notes"], limit // 2 if limit > 0 else 0))
         if slide.get("visual_desc"):
-            parts.append("Deskripsi visual: " + slide["visual_desc"])
+            parts.append("Deskripsi visual: " + cut(slide["visual_desc"], limit if limit > 0 else 0))
         return "\n".join(parts)
 
     @staticmethod
@@ -363,11 +425,11 @@ class BedrockDocumentGenerator:
         chapters_list = "\n".join(f"- {chapter}" for chapter in chapters)
         prompt = (
             "Pilih SATU bab yang paling sesuai untuk slide berikut ini, berdasarkan topiknya "
-            "(judul, teks, data tabel/chart, dan deskripsi visual bila ada). "
+            "(judul, ringkasan teks, judul chart dan header tabel, serta deskripsi visual bila ada). "
             "Balas HANYA dengan judul bab yang dipilih, disalin tepat sama persis dari daftar, "
             "tanpa tanda kutip, tanpa penjelasan tambahan.\n"
             f"Daftar bab:\n{chapters_list}\n\n"
-            f"Slide:\n{self._slide_text(slide)}"
+            f"Slide:\n{self._mapping_text(slide)}"
         )
         feedback = ""
         for attempt in range(1, self.MAP_SLIDES_MAX_ATTEMPTS + 1):
@@ -416,13 +478,13 @@ class BedrockDocumentGenerator:
         chapters: list[str],
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, list[str]]:
-        slide_text = "\n\n".join(self._slide_text(slide) for slide in deck["items"])
+        slide_text = "\n\n".join(self._mapping_text(slide) for slide in deck["items"])
         expected = {slide["ref"] for slide in deck["items"]}
         all_refs = [slide["ref"] for slide in deck["items"]]
         empty_mapping = {chapter: [] for chapter in chapters}
         base_prompt = (
             "Petakan setiap slide ke bab yang paling sesuai berdasarkan isi sebenarnya dari slide itu "
-            "(judul, teks, data tabel/chart, dan deskripsi visual bila ada) — termasuk slide yang didominasi "
+            "(judul, ringkasan teks, judul chart dan header tabel, serta deskripsi visual bila ada) — termasuk slide yang didominasi "
             "gambar/chart. Tentukan bab untuk setiap slide secara independen berdasarkan topiknya sendiri. "
             "JANGAN mengelompokkan slide yang topiknya tidak berkaitan ke bab yang sama hanya karena sulit "
             "diklasifikasikan atau untuk memenuhi syarat 'setiap ref harus muncul' — kalau sebuah slide sulit "
@@ -454,39 +516,70 @@ class BedrockDocumentGenerator:
             )
             try:
                 parsed = self._parse_json(response)
-                mapping: dict[str, list[str]] = {}
-                seen: list[str] = []
+                claimed: dict[str, list[str]] = {}
                 for chapter in chapters:
                     refs = parsed.get(chapter, [])
                     if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs):
                         raise BedrockError(f"Format pemetaan untuk {chapter} tidak valid.")
-                    mapping[chapter] = refs
-                    seen.extend(refs)
-                if set(seen) != expected or len(seen) != len(expected):
-                    missing = sorted(expected - set(seen))
-                    duplicated = sorted({ref for ref in seen if seen.count(ref) > 1})
-                    logger.warning(
-                        "Mapping percobaan %s GAGAL. Hilang (%s): %s. Duplikat (%s): %s. "
-                        "Total ref diharapkan=%s, diterima=%s.",
-                        attempt, len(missing), missing, len(duplicated), duplicated,
-                        len(expected), len(seen),
-                    )
-                    raise BedrockError(
-                        "Pemetaan slide tidak lengkap atau berisi slide duplikat. "
-                        f"Hilang: {missing or '-'}. Duplikat: {duplicated or '-'}."
-                    )
-                logger.info("Mapping percobaan %s BERHASIL. Pemetaan per bab: %s", attempt, {k: len(v) for k, v in mapping.items()})
-                _report(progress_callback, "mapping", "done", "", attempt, self.MAP_SLIDES_MAX_ATTEMPTS)
-                return mapping
+                    claimed[chapter] = refs
             except BedrockError as exc:
                 if attempt == self.MAP_SLIDES_MAX_ATTEMPTS:
                     logger.error("Mapping GAGAL TOTAL setelah %s percobaan.", self.MAP_SLIDES_MAX_ATTEMPTS)
                     raise BedrockError(
-                        "Pemetaan slide dari model tidak lengkap atau berisi slide duplikat "
+                        "Pemetaan slide dari model bukan JSON dengan format yang valid "
                         f"setelah {self.MAP_SLIDES_MAX_ATTEMPTS} percobaan. Coba lagi."
                     ) from exc
-                feedback = f"\n\nPercobaan sebelumnya gagal: {exc}. Perbaiki agar setiap ref muncul tepat satu kali."
+                feedback = f"\n\nPercobaan sebelumnya gagal: {exc}. Kembalikan hanya objek JSON sesuai bentuk yang diminta."
+                continue
+            mapping = self._repair_mapping(deck, chapters, claimed, progress_callback)
+            logger.info("Mapping percobaan %s BERHASIL. Pemetaan per bab: %s", attempt, {k: len(v) for k, v in mapping.items()})
+            _report(progress_callback, "mapping", "done", "", attempt, self.MAP_SLIDES_MAX_ATTEMPTS)
+            return mapping
         raise AssertionError("unreachable")
+
+    def _repair_mapping(
+        self,
+        deck: dict[str, Any],
+        chapters: list[str],
+        claimed: dict[str, list[str]],
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, list[str]]:
+        """Jadikan jawaban model pemetaan yang valid tanpa mengirim ulang seluruh deck: slide yang hilang
+        ditanyakan sendiri dengan semua bab, slide yang muncul di beberapa bab dipilihkan di antara bab
+        kandidatnya, dan ref yang tidak dikenal dibuang. Hasil tiap bab mengikuti urutan slide di deck."""
+        refs_in_deck = [slide["ref"] for slide in deck["items"]]
+        by_ref = {slide["ref"]: slide for slide in deck["items"]}
+        owners: dict[str, list[str]] = {}
+        unknown: set[str] = set()
+        for chapter in chapters:
+            for ref in claimed[chapter]:
+                if ref not in by_ref:
+                    unknown.add(ref)
+                elif chapter not in owners.setdefault(ref, []):
+                    owners[ref].append(chapter)
+        missing = [ref for ref in refs_in_deck if ref not in owners]
+        duplicated = [ref for ref in refs_in_deck if len(owners.get(ref, [])) > 1]
+        if missing or duplicated or unknown:
+            logger.warning(
+                "Mapping diperbaiki lokal. Hilang (%s): %s. Duplikat (%s): %s. Ref tak dikenal (%s): %s.",
+                len(missing), missing, len(duplicated), duplicated, len(unknown), sorted(unknown),
+            )
+        decided = {ref: found[0] for ref, found in owners.items() if len(found) == 1}
+        todo = [(ref, chapters) for ref in missing] + [(ref, owners[ref]) for ref in duplicated]
+        if todo:
+            _report(progress_callback, "mapping", "running", f"Memperbaiki {len(todo)} slide", 0, len(todo))
+
+            def choose(item: tuple[str, list[str]]) -> str:
+                ref, candidates = item
+                return candidates[0] if len(candidates) == 1 else self.classify_slide(by_ref[ref], candidates)
+
+            outcomes = run_parallel(todo, choose, self.workers)
+            for (ref, _candidates), (_ok, chapter) in zip(todo, outcomes):
+                decided[ref] = chapter
+        mapping: dict[str, list[str]] = {chapter: [] for chapter in chapters}
+        for ref in refs_in_deck:
+            mapping[decided[ref]].append(ref)
+        return mapping
 
     NARRATION_MAX_ATTEMPTS = 2
     NARRATION_BATCH_SLIDES = 5

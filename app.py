@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg2
+from psycopg2 import sql as pg_sql
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -61,6 +62,9 @@ DOCX_STEPS = [
 ]
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
+# Tabel log waktu dan token per langkah; skemanya ada di db/schema.sql.
+PROCESSING_LOG_TABLE = os.environ.get("PROCESSING_LOG_TABLE", "document_processing_log_v2")
+
 PG_DSN = {
     "host": os.environ.get("PGHOST", "localhost"),
     "port": os.environ.get("PGPORT", "5432"),
@@ -104,51 +108,28 @@ def _log_processing_times(
     if not _LOG_PROCESSING_ENABLED:
         return
     usage_totals = usage_totals or {}
-
-    def tokens(step: str, key: str) -> int | None:
-        return usage_totals.get(step, {}).get(key)
-
     total_input_tokens = sum(t.get("input_tokens", 0) for t in usage_totals.values())
     total_output_tokens = sum(t.get("output_tokens", 0) for t in usage_totals.values())
 
+    columns = ["document_name", "status"]
+    values: list = [document_name, status]
+    for step in LOGGED_STEPS:  # kolom: <step>_seconds, <step>_at, <step>_input_tokens, <step>_output_tokens
+        timing = step_timing.get(step) or {"seconds": None, "at": None}
+        tokens = usage_totals.get(step, {})
+        columns += [f"{step}_seconds", f"{step}_at", f"{step}_input_tokens", f"{step}_output_tokens"]
+        values += [timing["seconds"], timing["at"], tokens.get("input_tokens"), tokens.get("output_tokens")]
+    columns += ["total_seconds", "total_input_tokens", "total_output_tokens"]
+    values += [total_seconds, total_input_tokens, total_output_tokens]
+
+    query = pg_sql.SQL("INSERT INTO {table} ({columns}) VALUES ({placeholders})").format(
+        table=pg_sql.Identifier(PROCESSING_LOG_TABLE),
+        columns=pg_sql.SQL(", ").join(pg_sql.Identifier(column) for column in columns),
+        placeholders=pg_sql.SQL(", ").join(pg_sql.Placeholder() * len(columns)),
+    )
     try:
         with psycopg2.connect(**PG_DSN) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO document_processing_log (
-                        document_name, status,
-                        ingest_seconds, ingest_at, ingest_input_tokens, ingest_output_tokens,
-                        visuals_seconds, visuals_at, visuals_input_tokens, visuals_output_tokens,
-                        mapping_seconds, mapping_at, mapping_input_tokens, mapping_output_tokens,
-                        kb_seconds, kb_at, kb_input_tokens, kb_output_tokens,
-                        writing_seconds, writing_at, writing_input_tokens, writing_output_tokens,
-                        total_seconds, total_input_tokens, total_output_tokens
-                    ) VALUES (
-                        %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s
-                    )
-                    """,
-                    (
-                        document_name, status,
-                        step_timing["ingest"]["seconds"], step_timing["ingest"]["at"],
-                        tokens("ingest", "input_tokens"), tokens("ingest", "output_tokens"),
-                        step_timing["visuals"]["seconds"], step_timing["visuals"]["at"],
-                        tokens("visuals", "input_tokens"), tokens("visuals", "output_tokens"),
-                        step_timing["mapping"]["seconds"], step_timing["mapping"]["at"],
-                        tokens("mapping", "input_tokens"), tokens("mapping", "output_tokens"),
-                        step_timing["kb"]["seconds"], step_timing["kb"]["at"],
-                        tokens("kb", "input_tokens"), tokens("kb", "output_tokens"),
-                        step_timing["writing"]["seconds"], step_timing["writing"]["at"],
-                        tokens("writing", "input_tokens"), tokens("writing", "output_tokens"),
-                        total_seconds, total_input_tokens, total_output_tokens,
-                    ),
-                )
+                cur.execute(query, values)
     except Exception:
         app.logger.exception("Gagal menyimpan log waktu proses ke PostgreSQL.")
 
@@ -232,16 +213,16 @@ def _attach_slide_images(deck: dict, ppt_path: Path, render_dir: Path) -> int:
     return attached
 
 
-# Langkah yang punya kolom di tabel document_processing_log. "build" tidak punya kolom sendiri, tetapi
-# durasinya sudah termasuk di total_seconds; "kb" tidak dipakai dan tersimpan kosong (kolom tabel dipertahankan).
-LOGGED_STEPS = ("ingest", "visuals", "mapping", "kb", "writing")
+# Langkah yang punya kolom di tabel log. "build" tidak punya kolom sendiri, tetapi durasinya sudah
+# termasuk di total_seconds.
+LOGGED_STEPS = ("ingest", "visuals", "captions", "mapping", "writing")
 # Penanda baris alur PPT → DOCX pada tabel log (tidak ada kolom jenis alur).
 DOCX_LOG_SUFFIX = "[PPT→DOCX]"
 
 
 def _usage_for_log(usage_totals: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
     """Token per langkah model untuk tabel log. Panggilan narasi dan pembuatan panduan gaya dicatat di kolom
-    writing_*, setara penulisan isi bab; langkah dengan nama sama dijumlahkan."""
+    writing_*, setara penulisan isi bab; langkah yang dipetakan ke kolom sama dijumlahkan."""
     merged: dict[str, dict[str, int]] = {}
     for step, totals in usage_totals.items():
         key = "writing" if step in ("narration", "style_guide") else step
@@ -257,7 +238,7 @@ def _log_feature(
     name: str, status: str, started_at: float, generator: "BedrockDocumentGenerator | None" = None,
     seconds: dict[str, float] | None = None,
 ) -> None:
-    """Catat satu pemakaian fitur (durasi dan token) ke document_processing_log, seperti alur generate.
+    """Catat satu pemakaian fitur (durasi dan token) ke tabel log (PROCESSING_LOG_TABLE).
     `seconds` memberi durasi per langkah; total dihitung dari started_at. Tidak pernah melempar error."""
     timing = {key: {"seconds": None, "at": None} for key in LOGGED_STEPS}
     for step, value in (seconds or {}).items():
@@ -405,11 +386,10 @@ def _run_docx_job(session_id: str, ppt_path: Path, config: dict) -> None:
         if status == "running":
             active["key"] = step
             step_start.setdefault(step, now)
-        logged = "visuals" if step == "captions" else step  # ringkasan gambar dihitung bersama langkah visual
-        if status in ("done", "skipped", "error") and logged in step_timing:
+        if status in ("done", "skipped", "error") and step in step_timing:
             elapsed = now - step_start.get(step, now)
-            step_timing[logged]["seconds"] = round((step_timing[logged]["seconds"] or 0) + elapsed, 2)
-            step_timing[logged]["at"] = datetime.now(timezone.utc)
+            step_timing[step]["seconds"] = round((step_timing[step]["seconds"] or 0) + elapsed, 2)
+            step_timing[step]["at"] = datetime.now(timezone.utc)
         session["steps"][step] = {"status": status, "detail": detail, "current": current, "total": total}
 
     try:

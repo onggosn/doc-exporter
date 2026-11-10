@@ -69,6 +69,113 @@ class BedrockDocumentGeneratorTests(unittest.TestCase):
             self.generator._converse([{"text": "hello"}])
 
 
+class MappingTextTests(unittest.TestCase):
+    SLIDE = {
+        "ref": "slide-7", "title": "Inflasi", "notes": "Catatan " * 100, "visual_desc": "Grafik garis inflasi.",
+        "text": ["Inflasi terkendali " * 60, "baris kedua"],
+        "tables": [[["Komoditas", "Mei", "Juni"], ["Beras", "123456", "654321"]]],
+        "charts": [{"title": "Laju inflasi", "categories": ["Jan", "Feb"],
+                    "series": [{"name": "IHK", "values": [1.1, 2.2]}]}],
+    }
+
+    def text(self, **env):
+        with patch.dict("os.environ", env):
+            return BedrockDocumentGenerator._mapping_text(self.SLIDE)
+
+    def test_keeps_topic_signals_but_drops_numeric_table_and_chart_data(self):
+        text = self.text()
+        for expected in ("slide-7", "Inflasi", "Chart: Laju inflasi; IHK", "Header tabel: Komoditas Mei Juni",
+                         "Deskripsi visual: Grafik garis inflasi."):
+            self.assertIn(expected, text)
+        for dropped in ("Beras", "654321", "1.1", "Jan"):
+            self.assertNotIn(dropped, text)
+
+    def test_text_is_cut_at_the_limit_and_much_shorter_than_before(self):
+        text = self.text(MAPPING_TEXT_MAX_CHARS="100")
+        body = next(line for line in text.splitlines() if line.startswith("Teks: "))
+        self.assertLessEqual(len(body), len("Teks: ") + 101)
+        self.assertTrue(body.endswith("…"))
+        self.assertLess(len(self.text(MAPPING_TEXT_MAX_CHARS="400")), 900)
+
+    def test_zero_means_no_cut(self):
+        body = next(line for line in self.text(MAPPING_TEXT_MAX_CHARS="0").splitlines() if line.startswith("Teks: "))
+        self.assertIn("baris kedua", body)
+
+    def test_batch_and_per_slide_prompts_use_the_compact_text(self):
+        generator = object.__new__(BedrockDocumentGenerator)
+        generator.usage_totals, generator.workers = {}, 1
+        deck = {"items": [self.SLIDE]}
+        with patch.object(BedrockDocumentGenerator, "_converse", return_value='{"Bab A": ["slide-7"]}') as converse:
+            generator._map_slides_batch(deck, ["Bab A"])
+        self.assertIn("Header tabel: Komoditas", converse.call_args.args[0][0]["text"])
+        self.assertNotIn("654321", converse.call_args.args[0][0]["text"])
+        with patch.object(BedrockDocumentGenerator, "_converse", return_value="Bab A") as converse:
+            generator.classify_slide(self.SLIDE, ["Bab A"])
+        self.assertNotIn("654321", converse.call_args.args[0][0]["text"])
+
+
+class BatchMappingRepairTests(unittest.TestCase):
+    CHAPTERS = ["Moneter", "Makro", "Sistem Pembayaran"]
+    DECK = {"items": [{"ref": f"slide-{n}", "title": f"Judul {n}", "text": [f"isi {n}"]} for n in range(1, 7)]}
+
+    def generator(self):
+        generator = object.__new__(BedrockDocumentGenerator)
+        generator.usage_totals, generator.workers = {}, 1
+        return generator
+
+    def run_mapping(self, answers, classify=None):
+        """answers: balasan model untuk pemetaan sekaligus; classify: slide atau (slide, kandidat) -> bab."""
+        classified = []
+
+        def fake_classify(_self, slide, chapters):
+            classified.append((slide["ref"], list(chapters)))
+            return classify[slide["ref"]]
+
+        with patch.object(BedrockDocumentGenerator, "_converse", side_effect=answers) as converse, \
+                patch.object(BedrockDocumentGenerator, "classify_slide", fake_classify):
+            mapping = self.generator()._map_slides_batch(self.DECK, self.CHAPTERS)
+        return mapping, converse, classified
+
+    def test_complete_answer_needs_exactly_one_call(self):
+        answer = '{"Moneter": ["slide-1", "slide-2"], "Makro": ["slide-3", "slide-4"], "Sistem Pembayaran": ["slide-5", "slide-6"]}'
+        mapping, converse, classified = self.run_mapping([answer])
+        self.assertEqual((converse.call_count, classified), (1, []))
+        self.assertEqual(mapping["Makro"], ["slide-3", "slide-4"])
+
+    def test_missing_slides_are_classified_alone_with_all_chapters_instead_of_resending_the_deck(self):
+        answer = '{"Moneter": ["slide-1", "slide-2"], "Makro": ["slide-3"], "Sistem Pembayaran": ["slide-6"]}'
+        mapping, converse, classified = self.run_mapping([answer], {"slide-4": "Makro", "slide-5": "Moneter"})
+        self.assertEqual(converse.call_count, 1)  # tidak ada retry penuh
+        self.assertEqual(classified, [("slide-4", self.CHAPTERS), ("slide-5", self.CHAPTERS)])
+        self.assertEqual(mapping, {"Moneter": ["slide-1", "slide-2", "slide-5"], "Makro": ["slide-3", "slide-4"],
+                                   "Sistem Pembayaran": ["slide-6"]})  # urutan bab mengikuti urutan deck
+
+    def test_duplicated_slide_is_decided_among_only_its_candidate_chapters(self):
+        answer = ('{"Moneter": ["slide-1", "slide-2", "slide-3"], "Makro": ["slide-3", "slide-4"], '
+                  '"Sistem Pembayaran": ["slide-5", "slide-6"]}')
+        mapping, _converse, classified = self.run_mapping([answer], {"slide-3": "Makro"})
+        self.assertEqual(classified, [("slide-3", ["Moneter", "Makro"])])
+        self.assertEqual(mapping["Moneter"], ["slide-1", "slide-2"])
+        self.assertEqual(mapping["Makro"], ["slide-3", "slide-4"])
+        total = sum(len(refs) for refs in mapping.values())
+        self.assertEqual(total, 6)  # tiap slide tepat satu kali
+
+    def test_duplicate_within_same_chapter_and_unknown_refs_need_no_extra_call(self):
+        answer = ('{"Moneter": ["slide-1", "slide-1", "slide-99"], "Makro": ["slide-2", "slide-3", "slide-4"], '
+                  '"Sistem Pembayaran": ["slide-5", "slide-6"]}')
+        mapping, converse, classified = self.run_mapping([answer])
+        self.assertEqual((converse.call_count, classified), (1, []))
+        self.assertEqual(mapping["Moneter"], ["slide-1"])
+
+    def test_invalid_json_is_the_only_case_that_still_retries_the_full_prompt(self):
+        good = '{"Moneter": ["slide-1", "slide-2", "slide-3", "slide-4", "slide-5", "slide-6"]}'
+        mapping, converse, _ = self.run_mapping(["bukan json", good])
+        self.assertEqual(converse.call_count, 2)
+        self.assertEqual(len(mapping["Moneter"]), 6)
+        with self.assertRaisesRegex(BedrockError, "format yang valid"):
+            self.run_mapping(["x", "y", "z"])
+
+
 class ParseJsonTests(unittest.TestCase):
     parse = staticmethod(BedrockDocumentGenerator._parse_json)
 
@@ -167,6 +274,26 @@ class ImageSummaryTests(unittest.TestCase):
         generator = self.make(["Kredit tumbuh 9,5%.", "Kredit tumbuh."])
         self.assertEqual(generator.summarize_image(b"png", self.SLIDE, None), ("Kredit tumbuh.", []))
 
+    def long_slide(self):
+        filler = [f"Baris keterangan nomor {i} yang cukup panjang untuk mengisi batas." for i in range(60)]
+        return {**self.SLIDE, "text": filler + ["Kredit tumbuh 8,88% (yoy)."]}  # angka ada di ujung, setelah terpotong
+
+    def test_prompt_gets_trimmed_facts_but_numbers_are_still_checked_against_full_facts(self):
+        generator = self.make(["Kredit tumbuh 8,88%."])
+        with patch.dict("os.environ", {"CAPTION_FACTS_MAX_CHARS": "300"}):
+            summary, flagged = generator.summarize_image(b"png", self.long_slide(), None)
+        prompt = self.converse.call_args.args[0][0]["text"]
+        self.assertNotIn("8,88%", prompt)               # bagian ujung tidak terkirim ke model
+        self.assertIn("teks slide dipotong", prompt)
+        self.assertLess(len(prompt), 1500)
+        self.assertEqual((flagged, self.converse.call_count), ([], 1))  # tapi angka itu tetap dianggap sah
+
+    def test_zero_limit_sends_all_facts(self):
+        generator = self.make(["Kredit tumbuh 8,88%."])
+        with patch.dict("os.environ", {"CAPTION_FACTS_MAX_CHARS": "0"}):
+            generator.summarize_image(b"png", self.long_slide(), None)
+        self.assertIn("8,88%", self.converse.call_args.args[0][0]["text"])
+
     def make_deck(self, tmp):
         from pathlib import Path
 
@@ -198,25 +325,57 @@ class ImageSummaryTests(unittest.TestCase):
                 self.assertEqual(converse.call_count, calls, describe_split)
                 self.assertEqual(deck["items"][0].get("visual_desc"), "Deskripsi." if describe_split else None)
 
-    def test_summarize_images_covers_each_panel_or_whole_slide_and_honours_skip_refs(self):
+    PANEL_JSON = '{"1": "Ringkasan panel A.", "2": "Ringkasan panel B."}'
+
+    def test_summarize_images_one_call_per_slide_and_honours_skip_refs(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             generator = self.generator()
             deck = self.make_deck(tmp)
             progress = []
-            with patch.object(BedrockDocumentGenerator, "_converse", return_value="Ringkasan tanpa angka.") as converse:
+            replies = [self.PANEL_JSON, "Ringkasan slide utuh."]
+            with patch.object(BedrockDocumentGenerator, "_converse", side_effect=replies) as converse:
                 generator.summarize_images(deck, lambda *a: progress.append(a))
             split, whole, text_slide = deck["items"]
-            self.assertEqual(converse.call_count, 3)  # panel A, panel B, slide utuh; slide teks tidak punya gambar
-            self.assertEqual([p["summary"] for p in split["panel_images"]], ["Ringkasan tanpa angka."] * 2)
-            self.assertEqual((whole["summary"], "summary" in text_slide), ("Ringkasan tanpa angka.", False))
-            self.assertEqual(progress[-1][:2], ("captions", "done"))
+            self.assertEqual(converse.call_count, 2)  # satu untuk kedua panel, satu untuk slide utuh
+            self.assertEqual([p["summary"] for p in split["panel_images"]], ["Ringkasan panel A.", "Ringkasan panel B."])
+            self.assertEqual(split["panel_images"][0]["summary_flagged"], [])
+            self.assertEqual((whole["summary"], "summary" in text_slide), ("Ringkasan slide utuh.", False))
+            self.assertEqual(progress[-1], ("captions", "done", "", 3, 3))  # progres dihitung per gambar
+            content = converse.call_args_list[0].args[0]
+            self.assertEqual(sum(1 for block in content if "image" in block), 2)  # dua gambar, satu teks slide
+            self.assertEqual(content[0]["text"].count("Kredit tumbuh 8,88%"), 1)
 
             deck = self.make_deck(tmp)
             with patch.object(BedrockDocumentGenerator, "_converse", return_value="Ringkasan.") as converse:
                 generator.summarize_images(deck, None, skip_refs={"s1"})
             self.assertEqual(converse.call_count, 1)
             self.assertNotIn("summary", deck["items"][0]["panel_images"][0])
+
+    def test_panel_with_unsupported_number_is_redone_alone_while_good_panel_is_kept(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            deck = self.make_deck(tmp)
+            split = deck["items"][0]
+            replies = ['{"1": "Panel A baik.", "2": "Kredit tumbuh 9,5%."}', "Panel B diperbaiki."]
+            with patch.object(BedrockDocumentGenerator, "_converse", side_effect=replies) as converse:
+                self.generator().summarize_panels(split, split["panel_images"])
+            self.assertEqual(converse.call_count, 2)  # gabungan + ulang hanya panel B
+            self.assertEqual([p["summary"] for p in split["panel_images"]], ["Panel A baik.", "Panel B diperbaiki."])
+            self.assertEqual(split["panel_images"][1]["summary_flagged"], [])
+            single = converse.call_args_list[1].args[0]
+            self.assertEqual(sum(1 for block in single if "image" in block), 1)
+
+    def test_invalid_combined_answer_falls_back_to_one_call_per_panel(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            deck = self.make_deck(tmp)
+            split = deck["items"][0]
+            replies = ["bukan json", "Panel A.", "Panel B."]
+            with patch.object(BedrockDocumentGenerator, "_converse", side_effect=replies) as converse:
+                self.generator().summarize_panels(split, split["panel_images"])
+            self.assertEqual(converse.call_count, 3)
+            self.assertEqual([p["summary"] for p in split["panel_images"]], ["Panel A.", "Panel B."])
 
 
 class ParallelStepsTests(unittest.TestCase):

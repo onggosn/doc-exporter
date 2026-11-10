@@ -7,6 +7,7 @@ dan angka di narasi diperiksa terhadap isi slide.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 from collections import Counter
@@ -27,6 +28,7 @@ FRAGMENT_GROUP_CHARS = 200
 MAX_NARRATION_CHARS = 700
 SKIPPABLE_CHARS = 200
 SUMMARY_MAX_CHARS = 400
+DEFAULT_CAPTION_FACTS_MAX_CHARS = 3000  # batas teks slide di prompt ringkasan gambar; env CAPTION_FACTS_MAX_CHARS
 VERBATIM_CHAPTER_KEYWORDS = ("kesimpulan", "arahan")  # bab yang teksnya dibawa apa adanya, tanpa narasi model
 COVER_MAX_CHARS = 400
 LAMPIRAN_DIVIDER_MAX_CHARS = 300
@@ -300,6 +302,30 @@ def is_filler(slide: dict[str, Any]) -> bool:
     )
 
 
+def caption_facts_limit() -> int:
+    try:
+        return int(os.environ.get("CAPTION_FACTS_MAX_CHARS", DEFAULT_CAPTION_FACTS_MAX_CHARS))
+    except ValueError:
+        return DEFAULT_CAPTION_FACTS_MAX_CHARS
+
+
+def trim_facts(facts: str, limit: int | None = None) -> str:
+    """Potong teks fakta untuk prompt ringkasan gambar pada batas baris, supaya teks slide yang panjang
+    tidak terkirim penuh di setiap panel. Pemeriksaan angka tetap memakai fakta lengkap. Batas 0 = tanpa potong."""
+    limit = caption_facts_limit() if limit is None else limit
+    if limit <= 0 or len(facts) <= limit:
+        return facts
+    kept, size = [], 0
+    for line in facts.splitlines():
+        if size + len(line) + 1 > limit:
+            if not kept:  # satu baris melebihi batas: potong barisnya
+                kept.append(line[:limit])
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return "\n".join(kept) + "\n(teks slide dipotong; sisanya tidak ditampilkan)"
+
+
 def image_summary_prompt(title: str | None, header: str | None, facts: str, feedback: str = "") -> str:
     """Prompt ringkasan gambar untuk caption: hanya yang terlihat pada gambar, tanpa fakta tambahan."""
     return (
@@ -315,6 +341,27 @@ def image_summary_prompt(title: str | None, header: str | None, facts: str, feed
         f"Judul panel gambar: {header or '(tanpa judul)'}\n"
         f"Teks slide (hanya untuk mencocokkan angka dan istilah):\n{facts or '(tidak ada)'}"
         f"{feedback}"
+    )
+
+
+def panels_summary_prompt(title: str | None, headers: list[str | None], facts: str) -> str:
+    """Prompt satu panggilan untuk beberapa panel dari slide yang sama: teks slide dikirim sekali saja."""
+    keys = json.dumps({str(number): "…" for number in range(1, len(headers) + 1)}, ensure_ascii=False)
+    listing = "\n".join(f"Panel {number}: {header or '(tanpa judul)'}" for number, header in enumerate(headers, start=1))
+    return (
+        f"Ada {len(headers)} gambar panel dari satu slide. Untuk SETIAP panel, tulis ringkasan 1-2 kalimat "
+        "(maksimal 350 karakter) tentang apa yang ditampilkan gambarnya, untuk caption dokumen resmi berbahasa "
+        "Indonesia. Setiap gambar didahului label 'Panel N: judul'.\n"
+        "ATURAN KETAT:\n"
+        "- Hanya apa yang terlihat jelas pada gambar panel itu sendiri. Jangan menambah fakta, tafsiran, "
+        "sebab-akibat, rekomendasi, atau sumber. Yang tidak terbaca jangan disebut. Jangan mencampur isi antar panel.\n"
+        "- Sebut angka hanya bila tertulis jelas pada gambar panel itu DAN ada di teks slide di bawah; salin persis.\n"
+        "- Jangan memulai dengan 'Gambar ini menunjukkan' atau sejenisnya; langsung isinya.\n"
+        "- Teks polos tanpa markdown, tanpa tag, tanpa simbol poin.\n"
+        f"- Kembalikan HANYA satu objek JSON tanpa markdown dengan key nomor panel. Bentuk: {keys}\n\n"
+        f"Judul slide: {title or '(tanpa judul)'}\n"
+        f"Daftar panel:\n{listing}\n"
+        f"Teks slide (hanya untuk mencocokkan angka dan istilah):\n{facts or '(tidak ada)'}"
     )
 
 
