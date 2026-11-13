@@ -1,0 +1,58 @@
+{
+  "panduan": {
+    "nada": "Formal-teknokratis dengan nuansa urgensi kebijakan. Kalimat cenderung lugas, langsung pada substansi, dan berorientasi pada rekomendasi atau arah kebijakan. Sesekali menggunakan metafora ringkas di judul untuk memberi penekanan retoris, namun isi tetap analitis dan bernada otoritatif.",
+    "sudut_pandang": "Sudut pandang institusional orang ketiga, tanpa penggunaan 'kami' atau 'saya'. Subjek kalimat umumnya berupa entitas kebijakan, instrumen, atau variabel makroekonomi. Rekomendasi disampaikan dalam bentuk kalimat pasif atau kalimat aktif dengan subjek institusi/kebijakan.",
+    "struktur_paragraf": "Paragraf umumnya pendek, terdiri dari 2–4 kalimat. Kalimat pertama menyatakan pokok pikiran atau kesimpulan utama, diikuti kalimat penjelas berupa data pendukung, mekanisme transmisi, atau implikasi kebijakan. Banyak paragraf berfungsi sebagai pengantar singkat sebelum daftar poin atau tabel.",
+    "panjang_kalimat": "Kalimat paragraf rata-rata 16 kata (median 15), relatif ringkas. Kalimat dalam poin lebih panjang, rata-rata sekitar 21 kata (median 19), karena memuat detail instrumen, angka, dan keterangan tambahan. Kalimat kompleks dengan beberapa anak kalimat cukup lazim, terutama saat menjelaskan mekanisme kebijakan.",
+    "gaya_poin": "Poin ditulis sebagai kalimat utuh atau fragmen kalimat panjang yang berdiri sendiri, sering diawali kata kerja aktif (memperkuat, melanjutkan, melakukan, menyesuaikan). Tidak menggunakan titik koma di akhir poin; tiap poin merupakan unit informasi mandiri. Poin sering memuat angka, singkatan teknis, dan rujukan ke grafik atau tabel.",
+    "istilah_dan_singkatan": "Singkatan informal kata penghubung umum digunakan secara tidak konsisten: 'dg' dan 'dgn' untuk 'dengan', 'yg' untuk 'yang', 'shg' untuk 'sehingga', 'krn' untuk 'karena', 'dlm' untuk 'dalam', 'utk' untuk 'untuk'. Bentuk lengkap tetap jauh lebih dominan. Singkatan teknis institusional (SRBI, TSOM, TSNT, PUVA, OMK, KKIK, DPK, NPI, CAD, SBN, DNDF, dll.) digunakan tanpa penjelasan ulang, mengasumsikan pembaca sudah familiar.",
+    "format_angka": "Desimal dominan menggunakan koma (158 kali) namun titik juga muncul (17 kali), menunjukkan inkonsistensi. Simbol persen umumnya ditulis rapat tanpa spasi (194 kali vs 8 kali berspasi). Simbol Rp ditulis rapat dengan angka tanpa spasi. Satuan miliar/triliun ditulis lengkap; format USD diikuti angka langsung. Angka besar menggunakan pemisah ribuan titik.",
+    "istilah_asing": "Istilah asing dan teknis dicetak miring secara konsisten, meliputi istilah keuangan dan ekonomi seperti funding, yield, demand, supply, baseline, appetite, pricing, special rate, Growth Driver, risk-off, safe haven, pro-growth, dan sejenisnya. Istilah asing sangat sering muncul (475 kali) dan menjadi bagian integral dari kosakata dokumen tanpa diterjemahkan.",
+    "gaya_caption": {
+      "headline": "Headline caption menggunakan kombinasi huruf kapital penuh untuk label utama atau frasa penekanan, dan huruf biasa (title case/sentence case) untuk kalimat deskriptif. Headline sering berupa pernyataan kebijakan atau kesimpulan analitis yang ringkas dan tegas, kadang menggunakan tanda titik dua untuk memisahkan topik dari elaborasi.",
+      "label": "Label grafik dan tabel menggunakan format 'Grafik [nomor]. [Judul]' atau 'Tabel [nomor]. [Judul]' dengan penomoran berurut. Beberapa caption menyertakan sumber data di awal (mis. 'Sumber: ..., diolah'). Caption panjang berfungsi ganda sebagai ringkasan eksekutif mini dari isi visual."
+    },
+    "larangan": [
+      "Jangan gunakan sudut pandang orang pertama ('saya', 'kami') atau orang kedua ('Anda')",
+      "Jangan terjemahkan istilah teknis asing yang sudah lazim di bidang kebijakan moneter dan makroekonomi; biarkan dalam bahasa Inggris dan cetak miring",
+      "Jangan gunakan format desimal titik dan koma secara bergantian dalam satu dokumen tanpa konsistensi (meskipun sampel menunjukkan inkonsistensi, idealnya pilih satu)",
+      "Jangan tambahkan spasi antara simbol Rp dan angka",
+      "Jangan gunakan nada kasual, humor, atau bahasa percakapan",
+      "Jangan menulis poin sebagai fragmen terlalu pendek tanpa konteks; setiap poin harus informatif secara mandiri",
+      "Jangan hilangkan penomoran pada grafik dan tabel",
+      "Jangan gunakan singkatan informal (dg, yg, shg, dll.) dan bentuk lengkap secara acak tanpa pola; jika disingkat, lakukan secara konsisten dalam satu bagian",
+      "Jangan sertakan penjelasan panjang untuk akronim institusional yang sudah mapan di kalangan pembaca target",
+      "Jangan gunakan kalimat retoris atau pertanyaan langsung dalam isi paragraf (kecuali dalam konteks pertanyaan riset yang eksplisit)"
+    ],
+    "contoh": [
+      {
+        "konteks": "caption",
+        "teks": "K1. Perang bagai marathon: Tingkatkan harga minyak, lemahkan prospek global"
+      },
+      {
+        "konteks": "caption",
+        "teks": "EKSPANSI LIKUIDITAS DAPAT DIKOMBINASIKAN DG PENURUNAN SUKU BUNGA UNTUK MENDORONG EKONOMI LEBIH TINGGI"
+      },
+      {
+        "konteks": "paragraf",
+        "teks": "Bauran kebijakan BI dalam jangka pendek tetap difokuskan pada stabilisasi nilai tukar Rupiah dg tetap mendorong pertumbuhan ekonomi."
+      },
+      {
+        "konteks": "poin",
+        "teks": "Memperkuat koordinasi dan komunikasi melalui TPIP-TPID serta mempersiapkan pilot project dukungan program MBG untuk memitigasi risiko inflasi VF ke depan."
+      },
+      {
+        "konteks": "poin",
+        "teks": "Kredit April 2025 tumbuh moderat sebesar 8,88% (yoy), sejalan dengan DPK yang tumbuh lebih rendah sebesar 4,55% (yoy)."
+      },
+      {
+        "konteks": "poin",
+        "teks": "Melanjutkan operasi moneter pro-market melalui Agent Bank dan Primary Dealers (PDs) untuk membentuk TSSB dan Term Structure Nilai Tukar (TSNT) di pasar, transaksi SRBI di pasar sekunder, dan mendorong masuknya portfolio inflows asing."
+      }
+    ]
+  },
+  "model_id": "global.anthropic.claude-opus-4-6-v1",
+  "dibuat": "2026-11-10T04:38:45+00:00",
+  "contoh_dibuang": 0,
+  "sampel_sha256": "f9026b016430ddc315b1b25a794afd0c6bf1edb3011fcd6d3da14d8da3be159c"
+}

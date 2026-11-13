@@ -9,6 +9,9 @@ Spesifikasi:
         {"type": "heading", "level": 1, "text": "..."},
         {"type": "paragraph", "text": "teks dengan <i>istilah asing</i> dan <b>tebal</b>"},
         {"type": "bullets", "items": ["...", "..."]},
+        {"type": "numbered", "items": [{"marker": "1.", "text": "...", "depth": 0}]},   # penanda dari slide
+        {"type": "image", "source": <path|bytes>}   # selebar halaman, di luar tabel; diikuti blok caption/paragraph
+        {"type": "caption", "text": "...", "tipe": "headline" | "label", "align": "left"}
         {"type": "figure", "image": <path|bytes>, "caption": {"text": "...", "tipe": "label"},
          "width_percent": 80},
         {"type": "table", "widths": [40, 60], "banner": "Judul pita" | None,
@@ -33,6 +36,9 @@ from docx.shared import Pt, RGBColor
 
 
 BODY_FONT = "Frutiger 45 Light"
+COMMENT_AUTHOR = "Peninjau Fakta"  # penulis komentar Word dari blok yang punya "comments"
+COMMENT_INITIALS = "PF"
+COMMENT_AUTHORS = (("[Cek format", "Peninjau Format", "PFm"),)  # awalan komentar -> (penulis, inisial) khusus
 BODY_SIZE_PT = 11
 CAPTION_SIZE_PT = 10
 PAGE_NUMBER_SIZE_PT = 10
@@ -41,6 +47,8 @@ PARAGRAPH_SPACE_AFTER_PT = 6
 HEADING_SPACE_BEFORE_PT = 12
 CELL_PADDING_PT = 5.4
 IMAGE_SAFETY_PT = 2
+LIST_DEPTH_STEP_PT = 24  # geser per tingkat daftar bernomor
+LIST_HANG_PT = 22  # lebar penanda (nomor) sebelum teks
 TWIPS_PER_PT = 20
 BORDER_EIGHTHS_PT = 8  # garis solid 1 pt (satuan sz adalah seperdelapan poin)
 BANNER_FILL = "E6E6E6"
@@ -194,8 +202,12 @@ def _shade(cell, fill: str) -> None:
     cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd {nsdecls("w")} w:val="clear" w:color="auto" w:fill="{fill}"/>'))
 
 
-def _fill_container(next_paragraph, content: list[dict[str, Any]], width_pt: float) -> None:
-    """Isi sel atau badan dokumen; `next_paragraph()` memberi paragraf kosong berikutnya."""
+def _fill_container(
+    next_paragraph, content: list[dict[str, Any]], width_pt: float,
+    notes: list[tuple[Any, list[str]]] | None = None,
+) -> None:
+    """Isi sel atau badan dokumen; `next_paragraph()` memberi paragraf kosong berikutnya. Paragraf yang punya
+    "comments" dicatat di `notes` untuk dijadikan komentar Word setelah dokumen selesai disusun."""
     for position, item in enumerate(content):
         kind = item.get("type")
         if kind == "image":
@@ -216,13 +228,31 @@ def _fill_container(next_paragraph, content: list[dict[str, Any]], width_pt: flo
             paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             paragraph.paragraph_format.space_after = Pt(PARAGRAPH_SPACE_AFTER_PT)
             _add_runs(paragraph, item["text"])
+            if notes is not None and item.get("comments"):
+                notes.append((paragraph, [str(text) for text in item["comments"]]))
+        elif kind == "numbered":
+            for entry in item["items"]:
+                paragraph = next_paragraph()
+                depth = min(max(int(entry.get("depth", 0)), 0), 2)
+                left = LIST_DEPTH_STEP_PT * depth + LIST_HANG_PT
+                paragraph.paragraph_format.left_indent = Pt(left)
+                paragraph.paragraph_format.first_line_indent = Pt(-LIST_HANG_PT)
+                paragraph.paragraph_format.tab_stops.add_tab_stop(Pt(left))
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                paragraph.paragraph_format.space_after = Pt(PARAGRAPH_SPACE_AFTER_PT)
+                _add_runs(paragraph, f"{entry['marker']}\t{entry['text']}")
+                if notes is not None and entry.get("comments"):
+                    notes.append((paragraph, [str(text) for text in entry["comments"]]))
         elif kind == "bullets":
-            for text in item["items"]:
+            item_notes = item.get("item_comments") or {}
+            for number, text in enumerate(item["items"]):
                 paragraph = next_paragraph()
                 level = min((len(text) - len(text.lstrip(" "))) // 2, 2)  # butir menjorok = bersarang
                 paragraph.style = "List Bullet" if level == 0 else f"List Bullet {level + 1}"
                 paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 _add_runs(paragraph, text.strip())
+                if notes is not None and item_notes.get(number):
+                    notes.append((paragraph, [str(note) for note in item_notes[number]]))
         else:
             raise DocxBuildError(f"Tipe isi sel tidak dikenal: {kind!r}")
 
@@ -239,7 +269,7 @@ def _cell_paragraphs(cell):
     return next_paragraph
 
 
-def _add_table(document: Document, item: dict[str, Any], content_width_pt: float) -> None:
+def _add_table(document: Document, item: dict[str, Any], content_width_pt: float, notes: list | None = None) -> None:
     widths = item.get("widths")
     rows = item.get("rows")
     if not (isinstance(widths, list) and widths and all(isinstance(w, (int, float)) and w > 0 for w in widths)):
@@ -293,7 +323,7 @@ def _add_table(document: Document, item: dict[str, Any], content_width_pt: float
         else:
             raise DocxBuildError(f"Baris tabel #{index + 1} memiliki {len(row)} sel; diharapkan 1 atau {len(widths)}.")
         for cell, width_pt, content in targets:
-            _fill_container(_cell_paragraphs(cell), content, width_pt - 2 * CELL_PADDING_PT - IMAGE_SAFETY_PT)
+            _fill_container(_cell_paragraphs(cell), content, width_pt - 2 * CELL_PADDING_PT - IMAGE_SAFETY_PT, notes)
     document.add_paragraph().paragraph_format.space_after = Pt(PARAGRAPH_SPACE_AFTER_PT)
 
 
@@ -318,6 +348,7 @@ def build_docx(spec: dict[str, Any], page_setup: dict[str, Any], target: Path | 
     _configure_section(document, page_setup)
     margin = page_setup["margin"]
     content_width = page_setup["lebar_pt"] - margin["kiri"] - margin["kanan"]
+    notes: list[tuple[Any, list[str]]] = []
 
     for index, block in enumerate(blocks, start=1):
         kind = block.get("type") if isinstance(block, dict) else None
@@ -327,13 +358,25 @@ def build_docx(spec: dict[str, Any], page_setup: dict[str, Any], target: Path | 
                 raise DocxBuildError(f"Blok #{index}: level judul harus 1-{len(HEADING_SIZES_PT)}.")
             _add_runs(document.add_paragraph(style=f"Heading {level}"), block["text"])
         elif kind == "paragraph":
+            _fill_container(document.add_paragraph, [block], content_width, notes)
+        elif kind in ("bullets", "numbered"):
+            _fill_container(document.add_paragraph, [block], content_width, notes)
+        elif kind in ("image", "caption"):  # di luar tabel; gambar selebar halaman, caption di bawahnya
             _fill_container(document.add_paragraph, [block], content_width)
-        elif kind == "bullets":
-            _fill_container(document.add_paragraph, [block], content_width)
+            following = blocks[index] if index < len(blocks) else None
+            if kind == "image" and isinstance(following, dict) and following.get("type") == "caption":
+                document.paragraphs[-1].paragraph_format.keep_with_next = True  # caption tidak terpisah dari gambar
         elif kind == "figure":
             _add_figure(document, block, content_width)
         elif kind == "table":
-            _add_table(document, block, content_width)
+            _add_table(document, block, content_width, notes)
         else:
             raise DocxBuildError(f"Blok #{index}: tipe tidak dikenal: {kind!r}.")
+    for paragraph, comments in notes:  # komentar Word per catatan, menempel pada seluruh teks paragraf
+        if not paragraph.runs:
+            continue
+        for text in comments:
+            author, initials = next(((a, i) for prefix, a, i in COMMENT_AUTHORS if text.startswith(prefix)),
+                                    (COMMENT_AUTHOR, COMMENT_INITIALS))
+            document.add_comment(paragraph.runs, text=_clean(text), author=author, initials=initials)
     document.save(target)

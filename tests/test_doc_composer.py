@@ -29,7 +29,8 @@ class SlideRulesTests(unittest.TestCase):
         self.assertTrue(dc.slide_needs_image(slide("a", reasons=["chart"])))
         self.assertTrue(dc.slide_needs_image(slide("a", reasons=["diagram_or_object"])))
         self.assertTrue(dc.slide_needs_image(slide("a", tables=[[["a", "1"], ["b", "2"]]])))
-        self.assertFalse(dc.slide_needs_image(slide("a", tables=[[["a", "b"], ["c", "d"]]], reasons=["picture"])))
+        self.assertTrue(dc.slide_needs_image(slide("a", tables=[[["a", "b"], ["c", "d"]]])))  # tabel teks pun jadi gambar
+        self.assertTrue(dc.slide_needs_image(slide("a", "", ["Kalimat panjang. " * 100], tables=[[["a", "b"]]])))
         self.assertFalse(dc.slide_needs_image(slide("a", reasons=["low_text"])))
         self.assertFalse(dc.slide_needs_image(slide("a")))
 
@@ -49,8 +50,9 @@ class SlideRulesTests(unittest.TestCase):
     def test_fact_text_covers_every_source_of_facts(self):
         facts = dc.fact_text(slide(
             "a", "Judul", ["baris"], tables=[[["h1", "h2"], ["1", "2"]]], charts=[CHART], notes="catatan", desc="visual"))
-        for expected in ("Judul", "baris", "h1 h2", "Q1 Q2", "UMKM", "4.85 5.0", "catatan", "visual"):
+        for expected in ("Judul", "baris", "h1 h2", "Q1 Q2", "UMKM", "4.85 5.0", "visual"):
             self.assertIn(expected, facts)
+        self.assertNotIn("catatan", facts)  # speaker notes bukan sumber fakta
 
     def test_substance_ignores_title(self):
         self.assertFalse(dc.has_substance(slide("a", "Hanya judul")))
@@ -314,6 +316,18 @@ class ComposeTests(unittest.TestCase):
         ])
         self.assertEqual(report["gambar_diringkas"], 1)
 
+    def test_visual_object_over_half_the_canvas_is_outside_the_table_image_on_top_caption_below(self):
+        self.deck["items"][1].update(summary="Kredit UMKM tumbuh.", visual_area=0.6)
+        spec, _ = self.compose()
+        self.assertEqual(spec["blocks"][4:7], [
+            {"type": "image", "source": "/tmp/s2.png"},
+            {"type": "caption", "text": "Kredit UMKM", "tipe": "headline", "align": "left"},
+            {"type": "paragraph", "text": "Kredit UMKM tumbuh."},
+        ])
+        self.deck["items"][1]["visual_area"] = 0.5  # tepat separuh: belum cukup besar, tetap tabel dua kolom
+        spec, _ = self.compose()
+        self.assertEqual(spec["blocks"][4]["type"], "table")
+
     def test_narration_of_an_image_slide_follows_the_table_instead_of_sharing_the_row(self):
         spec, _ = self.compose()
         self.assertEqual(spec["blocks"][5:7], [{"type": "paragraph", "text": "Poin A"}, {"type": "paragraph", "text": "Poin B"}])
@@ -327,7 +341,8 @@ class ComposeTests(unittest.TestCase):
         self.assertEqual((caption_cell[0]["text"], caption_cell[0]["tipe"]), ("Tabel 1. Sektor", "label"))
         self.settings = {"penomoran": [], "caption_default": "kosong"}
         spec, _ = self.compose()
-        self.assertEqual(len(spec["blocks"][8]["rows"][0]), 1)  # tanpa caption dan tanpa ringkasan: hanya gambar
+        image_cell, caption_cell = spec["blocks"][8]["rows"][0]  # tanpa caption dan ringkasan: kolom kanan kosong,
+        self.assertEqual(([i["type"] for i in image_cell], caption_cell), (["image"], []))  # gambar tetap di kiri
 
     def test_image_summary_prompt_forbids_extra_facts_and_includes_the_context(self):
         prompt = dc.image_summary_prompt("Judul S", "PANEL A", "Kredit tumbuh 8,88%", "\n\nUlangi.")
@@ -371,6 +386,25 @@ class ExclusionAndVerbatimTests(unittest.TestCase):
                  slide("s6", "", ["LAMPIRAN SISTEM PEMBAYARAN"]),
                  slide("s7", "Data lain", ["Isi lampiran lain."])]
         self.assertEqual(dc.excluded_slides(items), {"s1": "sampul", "s4": "lampiran", "s5": "lampiran", "s6": "lampiran", "s7": "lampiran"})
+
+    def test_agenda_and_outline_slides_are_excluded_anywhere_in_the_deck(self):
+        agenda = ["I. Kesimpulan Diskusi dan Arahan ADG Hari 1", "  Kesimpulan dan Arahan Moneter",
+                  "II. Pokok Bahasan dan Rancangan Kebijakan", "III. Bauran Kebijakan"]
+        items = [slide("s1", "", ["Materi Rapat", "Jakarta, 21 Mei 2025"]),
+                 slide("s2", "Agenda Pembahasan", agenda),
+                 slide("s3", "Isi", ["Inflasi turun menjadi 3,2% pada 2025."]),
+                 slide("s4", "", ["Outline Pembahasan", "1. Moneter", "2. Makroprudensial"]),
+                 slide("s5", "Daftar Isi", ["Bab 1", "Bab 2"])]
+        self.assertEqual(dc.excluded_slides(items), {"s1": "sampul", "s2": "agenda", "s4": "agenda", "s5": "agenda"})
+
+    def test_slides_that_only_mention_agenda_or_hold_data_are_not_excluded(self):
+        items = [slide("s0", "Judul", ["Isi biasa. " * 60]),  # panjang: bukan sampul
+                 slide("s1", "Rekomendasi agenda reformasi struktural dan kebijakan jangka menengah", ["Teks."]),
+                 slide("s2", "Agenda Pembahasan", ["x" * 1600]),
+                 slide("s3", "Agenda", ["Ada tabel"], tables=[[["a", "1"]]]),
+                 slide("s4", "Agenda", charts=[CHART], reasons=["chart"]),
+                 slide("s5", "Agendanya", ["Bukan kata yang sama."])]
+        self.assertEqual(dc.excluded_slides(items), {})
 
     def test_first_slide_with_real_content_is_not_a_cover(self):
         items = [slide("s1", "Ringkasan", ["x" * 500]), slide("s2", "Grafik", charts=[CHART], reasons=["chart"])]
@@ -493,6 +527,89 @@ class WriteChapterNarrationTests(unittest.TestCase):
         self.assertIsInstance(error, BedrockError)
         self.assertIn("tidak valid", str(error))
         self.assertEqual(converse.call_count, 2)
+
+
+class FallbackSummaryTests(unittest.TestCase):
+    def test_table_summary_names_title_rows_and_columns_from_the_slide_only(self):
+        facts = {"tables": [[["Asumsi BI"], ["", "Baseline", "PR"], ["Nilai Tukar", "16.880", "17.260"],
+                             ["Yield SBN (%)", "6,7%", "7,3%"]]], "charts": [], "text": []}
+        summary = dc.fallback_summary(facts)
+        self.assertEqual(summary, "Tabel Asumsi BI memuat 2 baris data, antara lain Nilai Tukar, Yield SBN (%) dengan kolom Baseline, PR.")
+
+    def test_chart_summary_lists_series_and_period(self):
+        facts = {"tables": [], "text": [], "charts": [{"title": "Inflasi", "categories": ["Jan", "Feb", "Mar"],
+                                                       "series": [{"name": "IHK", "values": [1, 2, 3]}]}]}
+        self.assertEqual(dc.fallback_summary(facts), "Grafik Inflasi memuat seri IHK untuk periode Jan hingga Mar.")
+
+    def test_no_table_or_chart_gives_nothing_to_state(self):
+        self.assertEqual(dc.fallback_summary({"tables": [], "charts": [], "text": ["teks"]}), "")
+        self.assertEqual(dc.fallback_summary(None), "")
+
+    def test_panel_fact_text_is_trimmed_to_the_limit(self):
+        text = dc.panel_fact_text({"text": ["baris panjang " * 20] * 10, "tables": [], "charts": []}, limit=300)
+        self.assertLessEqual(len(text), 360)
+        self.assertIn("dipotong", text)
+
+
+class NumberedVerbatimTests(unittest.TestCase):
+    def test_numbered_lines_become_numbered_items_with_depth_and_marker_kept(self):
+        lines = ["1. Kebijakan Suku Bunga BI Rate", "  a. Suku bunga tetap 4,75%.", "  b. Berlaku efektif.",
+                 "2.   Kebijakan Operasi Moneter", "  a. Implementasi", "Poin biasa"]
+        blocks = dc.verbatim_blocks(lines)
+        self.assertEqual([b["type"] for b in blocks], ["numbered", "bullets"])
+        self.assertEqual(blocks[0]["items"], [
+            {"marker": "1.", "text": "Kebijakan Suku Bunga BI Rate", "depth": 0},
+            {"marker": "a.", "text": "Suku bunga tetap 4,75%.", "depth": 1},
+            {"marker": "b.", "text": "Berlaku efektif.", "depth": 1},
+            {"marker": "2.", "text": "Kebijakan Operasi Moneter", "depth": 0},
+            {"marker": "a.", "text": "Implementasi", "depth": 1},
+        ])
+        self.assertEqual(blocks[1]["items"], ["Poin biasa"])
+
+    def test_numbered_all_caps_line_keeps_its_marker(self):
+        blocks = dc.verbatim_blocks(["1. KEBIJAKAN MONETER"])
+        self.assertEqual(blocks, [{"type": "numbered", "items": [{"marker": "1.", "text": "KEBIJAKAN MONETER", "depth": 0}]}])
+
+
+class ContinuationTests(unittest.TestCase):
+    def deck(self):
+        def item(ref, title, text=(), numbered=()):
+            return {"ref": ref, "title": title, "text": list(text), "tables": [], "charts": [], "visual_desc": None,
+                    "vision_reasons": [], "verbatim": [{"label": "", "lines": list(numbered)}] if numbered else []}
+        return [
+            item("s1", "Rekomendasi Bauran Kebijakan RDG Maret 2026 (1)", numbered=["1. Kebijakan Suku Bunga", "  a. Tetap 4,75%."]),
+            item("s2", "Rekomendasi Bauran Kebijakan RDG Maret 2026 (2)", text=["2.   Kebijakan Operasi Moneter", "Isi."]),
+            item("s3", "Rekomendasi Bauran Kebijakan RDG Maret 2026 (3)",
+                 text=["2.   Kebijakan Operasi Moneter… (lanjutan)", "Isi lanjutan."],
+                 numbered=["2. Kebijakan Operasi Moneter (lanjutan)", "  c. Operasi kontraksi."]),
+            item("s4", "Rekomendasi Bauran Kebijakan RDG Maret 2026 (4)", text=["9. Tema Komunikasi (lanjutan…)"]),
+            item("s5", "Judul Lain (lanjutan)", text=["Isi."]),
+            item("s6", "Judul Lain", text=["Isi."]),
+        ]
+
+    def test_markers_are_removed_and_followers_continue_the_first_title(self):
+        items = self.deck()
+        dc.merge_continuations(items)
+        self.assertEqual([i["title"] for i in items][:4], ["Rekomendasi Bauran Kebijakan RDG Maret 2026"] * 4)
+        self.assertEqual([i["continues"] for i in items], [False, True, True, True, False, True])
+        self.assertEqual(items[4]["title"], "Judul Lain")  # "(lanjutan)" pun dibuang dari judul
+
+    def test_repeated_subheading_lines_are_dropped_but_a_first_occurrence_only_loses_its_marker(self):
+        items = self.deck()
+        dc.merge_continuations(items)
+        self.assertEqual(items[2]["text"], ["Isi lanjutan."])  # "2. Kebijakan Operasi Moneter… (lanjutan)" sudah muncul di s2
+        self.assertEqual(items[2]["verbatim"][0]["lines"], ["  c. Operasi kontraksi."])
+        self.assertEqual(items[3]["text"], ["9. Tema Komunikasi"])  # belum pernah muncul: tetap, tanpa penanda
+
+    def test_compose_prints_the_shared_title_once_per_chapter(self):
+        items = self.deck()[:3]
+        dc.merge_continuations(items)
+        for item in items:
+            dc.split_verbatim(item)
+        spec, _ = dc.compose({"items": items}, ["Bab"], {"Bab": ["s1", "s2", "s3"]},
+                             {"s2": ["Narasi dua."], "s3": ["Narasi tiga."]}, {"penomoran": [], "caption_default": "kosong"}, [])
+        headings = [b["text"] for b in spec["blocks"] if b["type"] == "heading"]
+        self.assertEqual(headings, ["Bab", "Rekomendasi Bauran Kebijakan RDG Maret 2026"])
 
 
 if __name__ == "__main__":

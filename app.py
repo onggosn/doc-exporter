@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -18,6 +19,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 import doc_composer
+import fact_review
 from docx_api_spec import DOCX_OPENAPI
 import profile_store
 from bedrock_service import (
@@ -58,7 +60,8 @@ DOCX_STEPS = [
     ("mapping", "Memetakan slide ke bab"),
     ("captions", "Meringkas gambar untuk caption"),
     ("writing", "Menulis narasi tiap bab"),
-    ("build", "Merakit dokumen DOCX"),
+    ("review", "Meninjau fakta ringkasan gambar (catatan di komentar Word)"),
+    ("build", "Merakit dokumen DOCX (termasuk tinjauan format butir dan nomor)"),
 ]
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -161,7 +164,7 @@ def index():
         max_upload_mb=MAX_UPLOAD_MB,
         model_id=os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_MODEL_ID,
         region=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", ""),
-        docx_default_chapters=DOCX_DEFAULT_CHAPTERS,
+        default_profile=_default_profile(),
     )
 
 
@@ -204,9 +207,11 @@ def _attach_slide_images(deck: dict, ppt_path: Path, render_dir: Path) -> int:
         if index in pngs:
             item = deck["items"][index - 1]
             if item.get("panels"):  # dipotong dari render utuh, sebelum margin slide dipangkas
-                crops = doc_composer.crop_panels(str(pngs[index]), item["panels"], render_dir, item["ref"])
+                crops = doc_composer.crop_panels(
+                    str(pngs[index]), item["panels"], render_dir, item["ref"], item.get("content_top") or 0.0)
                 if len(crops) >= 2:
                     item["panel_images"] = crops
+            doc_composer.crop_top(str(pngs[index]), item.get("content_top") or 0.0)  # judul dan placeholder atas tidak ikut
             doc_composer.trim_margins(str(pngs[index]))
             item["image_path"] = str(pngs[index])
             attached += 1
@@ -221,11 +226,11 @@ DOCX_LOG_SUFFIX = "[PPT→DOCX]"
 
 
 def _usage_for_log(usage_totals: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
-    """Token per langkah model untuk tabel log. Panggilan narasi dan pembuatan panduan gaya dicatat di kolom
-    writing_*, setara penulisan isi bab; langkah yang dipetakan ke kolom sama dijumlahkan."""
+    """Token per langkah model untuk tabel log. Panggilan narasi, pembuatan panduan gaya, dan tinjauan fakta dicatat
+    di kolom writing_*, setara penulisan isi bab; langkah yang dipetakan ke kolom sama dijumlahkan."""
     merged: dict[str, dict[str, int]] = {}
     for step, totals in usage_totals.items():
-        key = "writing" if step in ("narration", "style_guide") else step
+        key = "writing" if step in ("narration", "style_guide", "review") else step
         if key not in LOGGED_STEPS:
             continue
         entry = merged.setdefault(key, {"input_tokens": 0, "output_tokens": 0})
@@ -253,9 +258,30 @@ def _log_feature(
 DOCX_MAX_CHAPTER_FAILURES = 3
 
 
-DOCX_DEFAULT_WORKERS = 4
+DOCX_DEFAULT_WORKERS = 8  # worker paralel; ubah di sini atau lewat env DOCX_WORKERS (tidak ada di UI maupun parameter API)
 
-# Isi awal kolom "Struktur bab" di form PPT → DOCX; pengguna bebas mengubahnya sebelum membuat dokumen.
+DEFAULT_PROFILE = "dokumen-2d"
+
+
+def _default_profile() -> str:
+    """Profil jenis dokumen yang dipakai UI dan permintaan tanpa 'profile': env DOCX_PROFILE, kalau tidak DEFAULT_PROFILE."""
+    return (os.environ.get("DOCX_PROFILE") or DEFAULT_PROFILE).strip()
+
+
+CHAPTERS_MODES = ("slide", "daftar")
+
+
+def _chapters_mode() -> str:
+    """Sumber struktur bab, diatur di server lewat DOCX_CHAPTERS_MODE (tidak ada di UI maupun parameter API):
+    "slide" (bawaan) = tiap section PowerPoint menjadi satu bab tanpa pemetaan model; "daftar" = daftar bab
+    (parameter chapters, struktur tersimpan profil, atau DOCX_DEFAULT_CHAPTERS) dipetakan model."""
+    mode = (os.environ.get("DOCX_CHAPTERS_MODE") or "slide").strip().lower()
+    if mode not in CHAPTERS_MODES:
+        raise ValueError(f"DOCX_CHAPTERS_MODE harus 'slide' atau 'daftar', bukan '{mode}'.")
+    return mode
+
+
+# Struktur bab mode "daftar" bila klien dan profil tidak memberi struktur.
 DOCX_DEFAULT_CHAPTERS = """1. Kesimpulan Diskusi Hari 1 dan Arahan ADG
 1.1 Kesimpulan dan Arahan Moneter
 1.2 Kesimpulan dan Arahan Makroprudensial
@@ -275,10 +301,10 @@ DOCX_DEFAULT_CHAPTERS = """1. Kesimpulan Diskusi Hari 1 dan Arahan ADG
 4.7 Pokok-Pokok Komunikasi Kebijakan"""
 
 
-def _read_workers(raw: str) -> int:
-    """Jumlah worker paralel dari form, atau DOCX_WORKERS, atau bawaan; dibatasi 1 sampai MAX_WORKERS."""
+def _read_workers() -> int:
+    """Jumlah worker paralel: env DOCX_WORKERS bila ada, kalau tidak DOCX_DEFAULT_WORKERS; dibatasi 1 sampai MAX_WORKERS."""
     try:
-        value = int(raw or os.environ.get("DOCX_WORKERS") or DOCX_DEFAULT_WORKERS)
+        value = int(os.environ.get("DOCX_WORKERS") or DOCX_DEFAULT_WORKERS)
     except ValueError:
         value = DOCX_DEFAULT_WORKERS
     return max(1, min(value, MAX_WORKERS))
@@ -302,6 +328,46 @@ class JobCancelled(Exception):
 
 class _Skipped(Exception):
     """Bab tidak dikerjakan karena proses sudah dihentikan oleh kegagalan beruntun."""
+
+
+GENERIC_SECTION_NAME = re.compile(r"^(default section|untitled section|section tanpa judul|bagian tanpa judul)$", re.I)
+APPENDIX_SECTION_NAME = re.compile(r"^lampiran\b", re.I)
+
+
+def _slide_chapters(deck: dict, default_section: dict | None = None) -> tuple[list[str], dict[str, list[str]]]:
+    """Bab dan pemetaan dari section PowerPoint: tiap section menjadi satu bab, berisi slide-nya sendiri sesuai
+    urutan deck (tanpa model). Section lampiran dan section tanpa slide yang tersisa dilewati; section bernama
+    bawaan PowerPoint ("Default Section") dinamai dari judul slide pertamanya, atau dari `judul_bab` pengaturan
+    profil bila slide berkolomnya sudah dipecah (doc_composer.split_default_section)."""
+    alive = {item["ref"]: item for item in deck["items"]}
+    chapters: list[str] = []
+    mapping: dict[str, list[str]] = {}
+    for section in deck.get("sections") or []:
+        refs = [ref for ref in section["refs"] if ref in alive]
+        if not refs or APPENDIX_SECTION_NAME.match(section["nama"]):
+            continue
+        name = section["nama"]
+        if (default_section and deck.get("section_bawaan_dipakai") and default_section.get("judul_bab")
+                and " ".join(name.lower().split()) == " ".join(default_section["bagian_cocok"].lower().split())):
+            name = default_section["judul_bab"]
+        elif not name or GENERIC_SECTION_NAME.match(name):
+            name = (alive[refs[0]].get("title") or "").strip() or "Bagian tanpa judul"
+        unique, number = name, 2
+        while unique in mapping:
+            unique, number = f"{name} ({number})", number + 1
+        chapters.append(unique)
+        mapping[unique] = refs
+    if not chapters:
+        raise ValueError("Tidak ada section PowerPoint yang berisi slide untuk dijadikan bab.")
+    return chapters, mapping
+
+
+def _style_text(style: dict | None, use_guide: bool) -> str:
+    """Teks gaya untuk prompt narasi. Tanpa panduan gaya dari model (`use_guide` mati), aturan format dari statistik
+    referensi (desimal, persen, rupiah, istilah asing) tetap dipakai; panduan nada dan contoh kutipan tidak dikirim."""
+    if style and not use_guide:
+        style = {**style, "panduan": None}
+    return doc_composer.style_context(style)
 
 
 def _write_narrations(generator, chapters, mapping, by_ref, style_text, workers, progress):
@@ -397,29 +463,43 @@ def _run_docx_job(session_id: str, ppt_path: Path, config: dict) -> None:
         deck = ingest_pptx(ppt_path, source_id=uuid.uuid4().hex)
         if not deck["items"]:
             raise ValueError("Presentasi tidak memiliki slide.")
-        excluded = doc_composer.excluded_slides(deck["items"])  # sampul dan lampiran: keluar dari semua proses
+        excluded = doc_composer.excluded_slides(deck["items"])  # sampul, lampiran, dan agenda: keluar dari semua proses
         for item in deck["items"]:
             if item["ref"] in excluded:
                 item["excluded"] = excluded[item["ref"]]
+        if config.get("chapters_from_slides"):
+            if len(deck.get("sections") or []) < 1:
+                raise ValueError(
+                    "Presentasi tidak memakai section PowerPoint, jadi bab tidak bisa mengikuti slide. "
+                    "Pilih struktur bab lain.")
+            for section in deck["sections"]:
+                if APPENDIX_SECTION_NAME.match(section["nama"]):
+                    for item in deck["items"]:
+                        if item["ref"] in section["refs"] and not item.get("excluded"):
+                            item["excluded"] = "lampiran"
         images = _attach_slide_images(deck, ppt_path, work_dir / "slides")
-        if not config.get("split_panels", True):
-            for item in deck["items"]:
-                item.pop("panel_images", None)
+        profile = profile_store.load_profile(config["profile"])
+        split_columns = doc_composer.split_default_section(deck, profile.get("default_section"))
+        doc_composer.merge_continuations(deck["items"])  # "(1)", "(2)", "lanjutan": satu kesatuan, judul sekali
         for item in deck["items"]:
             doc_composer.split_verbatim(item)  # teks "Hasil Pembahasan Dewan Gubernur" dan "Key Takeaways" tetap asli
         skipped = [f"{item['ref']} ({item['excluded']})" for item in deck["items"] if item.get("excluded")]
         deck = {**deck, "items": [item for item in deck["items"] if not item.get("excluded")]}
         if not deck["items"]:
-            raise ValueError("Semua slide dikecualikan (sampul dan lampiran); tidak ada yang bisa diproses.")
+            raise ValueError("Semua slide dikecualikan (sampul, lampiran, agenda); tidak ada yang bisa diproses.")
         progress("ingest", "done", f"{len(deck['items'])} slide, {images} gambar, {len(skipped)} dikecualikan", 1, 1)
 
-        profile = profile_store.load_profile(config["profile"])
         generator = BedrockDocumentGenerator(model_id=config["model_id"], region=config["region"])
         generator.workers = config.get("workers", 1)
         generator.describe_split_slides = False  # slide yang dipecah cukup diringkas per panel
         generator.describe_visuals(deck, progress)
-        chapters = config["chapters"]
-        mapping = generator._map_slides(deck, chapters, config["mapping_mode"], progress)
+        if config.get("chapters_from_slides"):
+            chapters, mapping = _slide_chapters(deck, profile.get("default_section"))
+            progress("mapping", "skipped", f"Bab mengikuti section PowerPoint ({len(chapters)} bab)", 0, 0)
+        else:
+            chapters = config["chapters"]
+            mapping = generator._map_slides(deck, chapters, config["mapping_mode"], progress)
+            doc_composer.pin_split_slides(chapters, mapping, deck["items"])
 
         # Slide di bab kesimpulan/arahan dibawa apa adanya: tanpa ringkasan gambar dan tanpa narasi model.
         verbatim_refs = {ref for chapter in chapters if doc_composer.is_verbatim_chapter(chapter)
@@ -428,21 +508,36 @@ def _run_docx_job(session_id: str, ppt_path: Path, config: dict) -> None:
         summary_warnings = _summary_warnings(deck)
 
         by_ref = {slide["ref"]: slide for slide in deck["items"]}
-        style_text = doc_composer.style_context(profile["gaya"])
+        style_text = _style_text(profile["gaya"], config.get("use_style_guide", True))
         narration, warnings, fallback = _write_narrations(
             generator, chapters, mapping, by_ref, style_text, config.get("workers", 1), progress
         )
         warnings.update(summary_warnings)
 
+        review_mode = config.get("fact_review", "aturan")
+        review_result = None
+        if review_mode == "tidak":
+            progress("review", "skipped", "Tinjauan fakta dimatikan", 0, 0)
+        else:
+            progress("review", "running", "", 0, 0)
+            review_result = fact_review.review_deck(deck, generator if review_mode == "model" else None, progress)
+            progress("review", "done", f"{len(review_result['temuan'])} catatan", 1, 1)
+
         progress("build", "running", "", 0, 1)
         spec, composed = doc_composer.compose(
-            deck, chapters, mapping, narration, profile["settings"], profile["row_patterns"]
+            deck, chapters, mapping, narration, profile["settings"], profile["row_patterns"],
+            review_result["komentar"] if review_result else None,
+            review_lists=config.get("format_review", True),
         )
         output = work_dir / "dokumen.docx"
         build_docx(spec, page_setup_from_profile(profile["page"]), output)
         progress("build", "done", "", 1, 1)
 
         composed["slide_dikecualikan"] = skipped
+        composed["slide_dipecah_kolom"] = [
+            f"{ref} ({len([i for i in deck['items'] if i.get('kolom_asal') == ref])} kolom)" for ref in split_columns]
+        composed["tinjauan_fakta"] = fact_review.summarize(review_result, review_mode) if review_result else {
+            "mode": "tidak", "jumlah_temuan": 0, "temuan": [], "slide_ditinjau_model": [], "gagal_model": []}
         session["result"] = {
             "filename": f"{Path(config['document_name']).stem}.docx",
             "laporan": doc_composer.build_report(spec, composed, warnings, fallback),
@@ -501,20 +596,26 @@ def docx_start():
             raise ValueError("Pilih file PowerPoint yang akan diolah.")
         if Path(upload.filename).suffix.lower() not in ALLOWED_EXTENSIONS:
             raise ValueError("File harus berformat .pptx.")
-        profile_name = request.form.get("profile", "").strip()
+        profile_name = request.form.get("profile", "").strip() or _default_profile()
         profile_store.load_profile(profile_name)  # memastikan profil ada sebelum menyimpan unggahan
-        if "chapters" in request.form:
+        chapters_mode = _chapters_mode()
+        if chapters_mode == "slide":  # bab mengikuti section PowerPoint; daftar bab dari klien diabaikan
+            chapters = []
+        elif "chapters" in request.form:
             chapters = _read_chapters(request.form["chapters"])
         else:  # klien API boleh tidak mengirim bab: struktur tersimpan profil, lalu bawaan aplikasi
             chapters = _read_chapters(_profile_chapters_text(profile_name, request.form.get("struktur", "")))
         mapping_mode = request.form.get("mapping_mode", "batch").strip()
         if mapping_mode not in ("batch", "per_slide"):
             raise ValueError("Mode pemetaan slide tidak dikenali.")
+        fact_review_mode = request.form.get("fact_review", "aturan").strip() or "aturan"
+        if fact_review_mode not in fact_review.MODES:
+            raise ValueError("Mode tinjauan fakta tidak dikenali.")
         ppt_path = _save_upload(upload)
         work_dir = tempfile.mkdtemp(prefix="docx-job-")
 
         session_id = uuid.uuid4().hex
-        totals = {"ingest": 1, "visuals": 0, "mapping": 0, "captions": 0, "writing": len(chapters), "build": 1}
+        totals = {"ingest": 1, "visuals": 0, "mapping": 0, "captions": 0, "writing": len(chapters), "review": 0, "build": 1}
         DOCX_SESSIONS[session_id] = {
             "status": "running",
             "steps": {key: {"status": "pending", "detail": "", "current": 0, "total": totals[key]}
@@ -523,12 +624,15 @@ def docx_start():
             "created_at": time.time(), "finished_at": None, "cancel": threading.Event(),
         }
         config = {
-            "chapters": chapters, "profile": profile_name, "mapping_mode": mapping_mode,
+            "chapters": chapters, "chapters_from_slides": chapters_mode == "slide",
+            "profile": profile_name, "mapping_mode": mapping_mode,
             "model_id": request.form.get("model_id", "").strip() or None,
             "region": request.form.get("region", "").strip() or None,
             "document_name": upload.filename,
-            "split_panels": request.form.get("split_panels", "ya").strip() != "tidak",
-            "workers": _read_workers(request.form.get("workers", "")),
+            "use_style_guide": request.form.get("style_guide", "ya").strip() != "tidak",
+            "fact_review": fact_review_mode,
+            "format_review": request.form.get("format_review", "ya").strip() != "tidak",
+            "workers": _read_workers(),
         }
         threading.Thread(target=_run_docx_job, args=(session_id, ppt_path, config), daemon=True).start()
         ppt_path = work_dir = None  # kepemilikan dialihkan ke thread
@@ -624,8 +728,12 @@ def docx_options():
     return jsonify({
         "profil": [{"name": p["name"], "title": p["title"]} for p in profile_store.list_profiles()],
         "mapping_mode": {"nilai": ["batch", "per_slide"], "bawaan": "batch"},
-        "split_panels": {"nilai": ["ya", "tidak"], "bawaan": "ya"},
-        "workers": {"bawaan": _read_workers(""), "min": 1, "maks": MAX_WORKERS},
+        "style_guide": {"nilai": ["ya", "tidak"], "bawaan": "ya"},
+        "fact_review": {"nilai": list(fact_review.MODES), "bawaan": "aturan"},
+        "format_review": {"nilai": ["ya", "tidak"], "bawaan": "ya"},
+        "chapters_mode": {"nilai": list(CHAPTERS_MODES), "bawaan": "slide", "aktif": os.environ.get("DOCX_CHAPTERS_MODE") or "slide",
+                          "catatan": "Diatur di server lewat env DOCX_CHAPTERS_MODE; bukan parameter permintaan."},
+        "workers": {"bawaan": _read_workers(), "min": 1, "maks": MAX_WORKERS, "catatan": "Diatur di server (DOCX_DEFAULT_WORKERS atau env DOCX_WORKERS); bukan parameter permintaan."},
         "model_id": os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_MODEL_ID,
         "region": os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or None,
         "bab": {"maksimal": 20, "bawaan_aplikasi": DOCX_DEFAULT_CHAPTERS.splitlines()},

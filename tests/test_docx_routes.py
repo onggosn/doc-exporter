@@ -1,3 +1,4 @@
+import copy
 import io
 import json
 import tempfile
@@ -77,7 +78,8 @@ class DocxJobTests(unittest.TestCase):
         self.addCleanup(log_patcher.stop)
         self.client = app.app.test_client()
 
-    def run_job(self, generator=FakeGenerator, chapters=("Ringkasan",), appendix=False, pre_cancel=False):
+    def run_job(self, generator=FakeGenerator, chapters=("Ringkasan",), appendix=False, pre_cancel=False,
+                sections=None, kolom=None, **config_extra):
         image = self.tmp / "slide-2.png"
         Image.new("RGB", (400, 300), "teal").save(image)
         deck = {"items": [slide("cover", "Judul Dokumen", ["Rapat Dewan Gubernur"]),
@@ -85,6 +87,10 @@ class DocxJobTests(unittest.TestCase):
                           slide("slide-2", "Grafik Kredit", ["Kredit 4.85%"], reasons=["chart"]),
                           slide("slide-3", "Penutup", ["Tindak lanjut dilakukan segera."]),
                           slide("slide-4", "Data Tambahan", ["Data tambahan disajikan di lampiran."])]}
+        if sections is not None:
+            deck["sections"] = sections
+        if kolom:
+            deck["items"][1]["kolom"] = kolom
         if appendix:
             deck["items"] += [slide("lamp-1", "", ["LAMPIRAN KEBIJAKAN EKONOMI DAN MONETER"]),
                               slide("lamp-2", "Data Lampiran", ["Isi lampiran yang cukup panjang."])]
@@ -107,12 +113,70 @@ class DocxJobTests(unittest.TestCase):
         if pre_cancel:
             app.DOCX_SESSIONS["sid"]["cancel"].set()
         config = {"chapters": list(chapters), "profile": "dokumen-2d", "mapping_mode": "batch",
-                  "model_id": "model-uji", "region": None, "document_name": "contoh.pptx"}
+                  "model_id": "model-uji", "region": None, "document_name": "contoh.pptx",
+                  "chapters_from_slides": sections is not None, **config_extra}
         with patch.object(app, "ingest_pptx", return_value=deck), \
              patch.object(app, "_attach_slide_images", side_effect=attach), \
              patch.object(app, "BedrockDocumentGenerator", generator):
             app._run_docx_job("sid", ppt, config)
         return ppt, work
+
+    def test_job_following_slides_uses_sections_as_chapters_without_model_mapping(self):
+        class NoMapping(FakeGenerator):
+            def _map_slides(self, *args, **kwargs):
+                raise AssertionError("pemetaan model tidak boleh dipanggil")
+
+        sections = [{"nama": "Bagian A", "refs": ["slide-1", "slide-2"]},
+                    {"nama": "Bagian B", "refs": ["slide-3"]},
+                    {"nama": "Lampiran X", "refs": ["slide-4"]}]
+        self.run_job(generator=NoMapping, sections=sections)
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual(session["status"], "done", session["error"])
+        self.assertEqual(session["steps"]["mapping"]["status"], "skipped")
+        headings = [p.text for p in Document(session["file_path"]).paragraphs if p.style.name.startswith("Heading 1")]
+        self.assertEqual(headings, ["Bagian A", "Bagian B"])  # Lampiran X dilewati
+        self.assertIn("slide-4 (lampiran)", session["result"]["laporan"]["slide_dikecualikan"])
+
+    DEFAULT_SECTION = {
+        "bagian_cocok": "Default Section", "judul_bab": "1. Kesimpulan Diskusi Hari 1 dan Arahan ADG",
+        "judul_kolom": "1.{n} Kesimpulan dan Arahan {nama}",
+        "kolom": [{"cocok": "MONETER", "nama": "Moneter"}, {"cocok": "SP", "nama": "Sistem Pembayaran"}]}
+    COLUMNS = [{"header": "SP PUR", "text": ["KESIMPULAN", "K#1: isi SP"]},
+               {"header": "MONETER", "text": ["KESIMPULAN", "K1: isi moneter"]}]
+    SECTIONS = [{"nama": "Default Section", "refs": ["slide-1"]}, {"nama": "Bagian B", "refs": ["slide-3"]}]
+
+    def headings(self):
+        return [(p.style.name, p.text) for p in Document(app.DOCX_SESSIONS["sid"]["file_path"]).paragraphs
+                if p.style.name.startswith("Heading")]
+
+    def test_job_maps_the_default_section_with_the_profile_and_reports_the_split(self):
+        (self.tmp / "profiles" / "dokumen-2d" / "default_section.json").write_text(
+            json.dumps(self.DEFAULT_SECTION), encoding="utf-8")
+        self.run_job(sections=copy.deepcopy(self.SECTIONS), kolom=copy.deepcopy(self.COLUMNS))
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual(session["status"], "done", session["error"])
+        self.assertEqual(self.headings(), [
+            ("Heading 1", "1. Kesimpulan Diskusi Hari 1 dan Arahan ADG"),
+            ("Heading 2", "1.1 Kesimpulan dan Arahan Moneter"),
+            ("Heading 2", "1.2 Kesimpulan dan Arahan Sistem Pembayaran"),
+            ("Heading 1", "Bagian B"), ("Heading 2", "Penutup")])
+        self.assertEqual(session["result"]["laporan"]["slide_dipecah_kolom"], ["slide-1 (2 kolom)"])
+        texts = [p.text for p in Document(session["file_path"]).paragraphs]
+        self.assertIn("K1: isi moneter", " ".join(texts))
+
+    def test_job_without_default_section_config_exports_the_slide_as_is(self):
+        self.run_job(sections=copy.deepcopy(self.SECTIONS), kolom=copy.deepcopy(self.COLUMNS))  # profil uji tidak punya default_section.json
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual(session["status"], "done", session["error"])
+        self.assertEqual([h for h in self.headings() if h[0] == "Heading 1"], [("Heading 1", "Pengantar"), ("Heading 1", "Bagian B")])
+        self.assertEqual(session["result"]["laporan"]["slide_dipecah_kolom"], [])
+        self.assertNotIn("K1: isi moneter", " ".join(p.text for p in Document(session["file_path"]).paragraphs))
+
+    def test_job_following_slides_fails_clearly_when_the_deck_has_no_sections(self):
+        self.run_job(sections=[])
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual(session["status"], "error")
+        self.assertIn("section PowerPoint", session["error"])
 
     def test_successful_job_builds_docx_reports_and_cleans_up(self):
         ppt, work = self.run_job()
@@ -134,6 +198,61 @@ class DocxJobTests(unittest.TestCase):
         self.assertEqual((report["gambar"], report["narasi"], report["gambar_ganda"]), (1, 2, []))
         self.assertEqual(report["angka_tidak_didukung"], [{"ref": "slide-2", "angka": ["9.9"]}])
         self.assertEqual(session["result"]["filename"], "contoh.docx")
+
+    class WrongSummary(FakeGenerator):
+        def summarize_images(self, deck, progress, skip_refs=frozenset()):
+            for item in deck["items"]:
+                if item.get("image_path"):
+                    item["summary"] = "Kredit tumbuh 77,7% pada Juli 2027."
+            progress("captions", "done", "", 1, 1)
+
+    def comments_of(self):
+        return [(c.author, c.text) for c in Document(app.DOCX_SESSIONS["sid"]["file_path"]).comments]
+
+    def test_fact_review_rules_comment_only_image_summaries_without_changing_text(self):
+        self.run_job(self.WrongSummary)  # bawaan: aturan
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual(session["status"], "done", session["error"])
+        self.assertEqual(session["steps"]["review"]["status"], "done")
+        review = session["result"]["laporan"]["tinjauan_fakta"]
+        self.assertEqual(review["mode"], "aturan")
+        self.assertEqual({t["ref"] for t in review["temuan"]}, {"slide-2"})  # hanya slide bergambar; narasi tidak
+        comments = self.comments_of()
+        self.assertEqual(len(comments), review["jumlah_temuan"])
+        self.assertEqual({author for author, _ in comments}, {"Peninjau Fakta"})
+        self.assertTrue(all(text.startswith("[Cek fakta:") for _, text in comments))
+        document = Document(session["file_path"])
+        cell_texts = [c.text for t in document.tables for r in t.rows for c in r.cells]
+        self.assertTrue(any("Kredit tumbuh 77,7% pada Juli 2027." in t for t in cell_texts))  # teks tetap
+
+    def test_fact_review_off_skips_the_step_and_adds_no_fact_comments(self):
+        self.run_job(self.WrongSummary, fact_review="tidak")
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual(session["status"], "done", session["error"])
+        self.assertEqual(session["steps"]["review"]["status"], "skipped")
+        self.assertEqual(session["result"]["laporan"]["tinjauan_fakta"]["mode"], "tidak")
+        self.assertEqual(self.comments_of(), [])
+
+    def test_fact_review_model_mode_adds_model_findings_and_logs_tokens_as_writing(self):
+        class Model(self.WrongSummary):
+            usage_totals = {"narration": {"input_tokens": 10, "output_tokens": 1},
+                            "review": {"input_tokens": 5, "output_tokens": 2}}
+            workers = 1
+
+            def review_slide(self, slide, paragraphs):
+                return [{"paragraf": 1, "kutipan": "tumbuh", "alasan": "Gambar tidak menunjukkan pertumbuhan."}]
+
+        self.run_job(Model, fact_review="model")
+        session = app.DOCX_SESSIONS["sid"]
+        self.assertEqual(session["status"], "done", session["error"])
+        review = session["result"]["laporan"]["tinjauan_fakta"]
+        self.assertEqual(review["slide_ditinjau_model"], ["slide-2"])
+        self.assertTrue(any(text.startswith("[Cek fakta: model]") for _, text in self.comments_of()))
+        self.assertEqual(self.log.call_args.args[4]["writing"], {"input_tokens": 15, "output_tokens": 3})
+
+    def test_report_always_carries_the_format_review_list(self):
+        self.run_job()
+        self.assertEqual(app.DOCX_SESSIONS["sid"]["result"]["laporan"]["tinjauan_format"], [])
 
     def test_duration_and_tokens_are_logged_like_the_existing_flow(self):
         class Tokens(FakeGenerator):
@@ -376,6 +495,9 @@ class DocxApiTests(unittest.TestCase):
         upload_patcher.start()
         self.addCleanup(upload_patcher.stop)
         self.addCleanup(app.DOCX_SESSIONS.clear)
+        chapters_mode = patch.dict("os.environ", {"DOCX_CHAPTERS_MODE": "daftar"})  # tes struktur bab memakai mode daftar
+        chapters_mode.start()
+        self.addCleanup(chapters_mode.stop)
         self.client = app.app.test_client()
 
     def session(self, status="running", **extra):
@@ -410,12 +532,106 @@ class DocxApiTests(unittest.TestCase):
         self.assertIn("text/html", response.content_type)
         self.assertIn("/api/docx/openapi.json", response.get_data(as_text=True))
 
+    STYLE = {
+        "statistik": {"angka": {"desimal_koma": 10, "desimal_titik": 1, "persen_rapat": 10, "persen_spasi": 0,
+                                "rupiah_rapat": 5, "rupiah_spasi": 0}, "miring": {"jumlah": 3}},
+        "panduan": {"panduan": {
+            "nada": "Formal-teknokratis", "sudut_pandang": "Orang ketiga", "panjang_kalimat": "16 kata",
+            "gaya_poin": "Kalimat utuh", "istilah_dan_singkatan": "SRBI", "format_angka": "Koma",
+            "istilah_asing": "Miring", "larangan": ["Jangan pakai saya"], "contoh": []}},
+    }
+
+    def test_style_guide_toggle_keeps_format_rules_but_drops_the_model_guide(self):
+        on, off = app._style_text(self.STYLE, True), app._style_text(self.STYLE, False)
+        self.assertIn("Nada: Formal-teknokratis", on)
+        self.assertNotIn("Nada:", off)
+        self.assertNotIn("Hindari:", off)
+        self.assertTrue(off)  # aturan format dari statistik tetap ada
+        self.assertTrue(on.startswith(off))
+        self.assertEqual(app._style_text(None, False), "")
+
+    def test_sections_become_chapters_skipping_appendix_empty_and_generic_names(self):
+        deck = {"items": [{"ref": f"slide-{i}", "title": f"Judul {i}"} for i in (2, 3, 4, 5, 6, 8)],
+                "sections": [
+                    {"nama": "Default Section", "refs": ["slide-1", "slide-2", "slide-3"]},  # slide-1 sudah dikecualikan
+                    {"nama": "Moneter", "refs": ["slide-4", "slide-5"]},
+                    {"nama": "Kosong", "refs": ["slide-1"]},
+                    {"nama": "Moneter", "refs": ["slide-6"]},
+                    {"nama": "Lampiran Moneter", "refs": ["slide-8"]}]}
+        chapters, mapping = app._slide_chapters(deck)
+        self.assertEqual(chapters, ["Judul 2", "Moneter", "Moneter (2)"])
+        self.assertEqual(mapping, {"Judul 2": ["slide-2", "slide-3"], "Moneter": ["slide-4", "slide-5"],
+                                   "Moneter (2)": ["slide-6"]})
+        with self.assertRaises(ValueError):
+            app._slide_chapters({"items": [{"ref": "slide-1"}], "sections": [{"nama": "Lampiran", "refs": ["slide-1"]}]})
+
+    def test_chapters_follow_slides_by_default_and_ignore_the_chapter_list(self):
+        with patch.dict("os.environ", {"DOCX_CHAPTERS_MODE": ""}):
+            _, thread = self.start(chapters="Bab A\nBab B")
+        config = thread.call_args.kwargs["args"][2]
+        self.assertEqual((config["chapters_from_slides"], config["chapters"]), (True, []))
+
+    def test_chapters_mode_is_switched_by_server_env_only_not_by_a_request_parameter(self):
+        with patch.dict("os.environ", {"DOCX_CHAPTERS_MODE": "daftar"}):
+            _, thread = self.start(chapters="Bab A\nBab B")
+            config = thread.call_args.kwargs["args"][2]
+            self.assertEqual((config["chapters_from_slides"], config["chapters"]), (False, ["Bab A", "Bab B"]))
+        with patch.dict("os.environ", {"DOCX_CHAPTERS_MODE": "slide"}):
+            _, thread = self.start(chapters_mode="daftar", chapters="Bab A")  # parameter lama diabaikan
+            self.assertTrue(thread.call_args.kwargs["args"][2]["chapters_from_slides"])
+        with patch.dict("os.environ", {"DOCX_CHAPTERS_MODE": "aneh"}):
+            response, _ = self.start()
+            self.assertEqual(response.status_code, 400)
+
+    def test_profile_defaults_to_dokumen_2d_and_can_be_switched_by_env_only(self):
+        with patch.dict("os.environ", {"DOCX_PROFILE": ""}):
+            response, thread = self.start(profile="")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(thread.call_args.kwargs["args"][2]["profile"], "dokumen-2d")
+            html = self.client.get("/").get_data(as_text=True)
+            self.assertIn('data-profile="dokumen-2d"', html)
+        with patch.dict("os.environ", {"DOCX_PROFILE": "tidak-ada"}):
+            response, _ = self.start(profile="")
+            self.assertEqual(response.status_code, 404)  # profil bawaan server tidak ditemukan
+
+    def test_page_has_no_profile_picker_and_every_element_the_script_needs(self):
+        import re
+        html = re.sub(r"<!--.*?-->", "", self.client.get("/").get_data(as_text=True), flags=re.S)  # tanpa blok yang dikomentari
+        script = Path("static/docx-convert.js").read_text(encoding="utf-8")
+        self.assertNotIn("docx-profile-select", html)
+        for element_id in set(re.findall(r'querySelector\("#([\w-]+)"\)', script)):
+            self.assertIn(f'id="{element_id}"', html, element_id)  # elemen hilang = skrip berhenti, tombol tetap disabled
+
+    def test_start_reads_style_guide_toggle(self):
+        for overrides, expected in (({"style_guide": "tidak"}, False), ({"style_guide": "ya"}, True), ({}, True)):
+            _, thread = self.start(**overrides)
+            self.assertIs(thread.call_args.kwargs["args"][2]["use_style_guide"], expected, overrides)
+
+    def test_start_reads_and_validates_fact_review_mode(self):
+        for overrides, expected in (({}, "aturan"), ({"fact_review": "model"}, "model"), ({"fact_review": "tidak"}, "tidak")):
+            _, thread = self.start(**overrides)
+            self.assertEqual(thread.call_args.kwargs["args"][2]["fact_review"], expected, overrides)
+        response, _ = self.start(fact_review="semua")
+        self.assertEqual(response.status_code, 400)
+
+    def test_start_reads_format_review_toggle(self):
+        for overrides, expected in (({}, True), ({"format_review": "ya"}, True), ({"format_review": "tidak"}, False)):
+            _, thread = self.start(**overrides)
+            self.assertIs(thread.call_args.kwargs["args"][2]["format_review"], expected, overrides)
+
     def test_options_lists_defaults_limits_and_profiles(self):
         with patch.dict("os.environ", {"DOCX_WORKERS": ""}):
             options = self.client.get("/api/docx/options").json
         self.assertEqual([p["name"] for p in options["profil"]], ["dokumen-2d"])
         self.assertEqual(options["mapping_mode"], {"nilai": ["batch", "per_slide"], "bawaan": "batch"})
-        self.assertEqual(options["workers"], {"bawaan": app.DOCX_DEFAULT_WORKERS, "min": 1, "maks": app.MAX_WORKERS})
+        self.assertEqual(options["style_guide"], {"nilai": ["ya", "tidak"], "bawaan": "ya"})
+        self.assertEqual(options["chapters_mode"]["bawaan"], "slide")
+        self.assertEqual(options["chapters_mode"]["nilai"], ["slide", "daftar"])
+        self.assertEqual(options["fact_review"], {"nilai": ["tidak", "aturan", "model"], "bawaan": "aturan"})
+        self.assertEqual(options["format_review"], {"nilai": ["ya", "tidak"], "bawaan": "ya"})
+        self.assertEqual({k: options["workers"][k] for k in ("bawaan", "min", "maks")},
+                         {"bawaan": app.DOCX_DEFAULT_WORKERS, "min": 1, "maks": app.MAX_WORKERS})
+        self.assertNotIn("split_panels", options)
         self.assertEqual(len(options["bab"]["bawaan_aplikasi"]), 17)
         self.assertEqual(options["bab"]["maksimal"], 20)
         self.assertEqual([step["key"] for step in options["langkah"]], [k for k, _ in app.DOCX_STEPS])
@@ -483,28 +699,30 @@ class DocxApiTests(unittest.TestCase):
 
 
 class DefaultChaptersTests(unittest.TestCase):
-    def test_docx_form_is_prefilled_with_the_default_chapter_structure(self):
+    def test_docx_form_has_no_chapter_structure_or_mapping_fields_because_chapters_follow_slides(self):
         html = app.app.test_client().get("/").get_data(as_text=True)
-        start = html.index("2. Buat DOCX dari PPT")
-        textarea = html[html.index('<textarea name="chapters"', start):]
-        textarea = textarea[:textarea.index("</textarea>")]
-        lines = textarea[textarea.index(">") + 1:].splitlines()
-        self.assertEqual(lines[0], "1. Kesimpulan Diskusi Hari 1 dan Arahan ADG")
-        self.assertEqual(lines[-1], "4.7 Pokok-Pokok Komunikasi Kebijakan")
-        self.assertEqual(len(lines), 17)
-        self.assertEqual(lines, app.DOCX_DEFAULT_CHAPTERS.splitlines())
+        form = html[html.index('id="docx-create-form"'):html.index("docx-progress-panel")]
+        for removed in ('name="chapters"', 'name="chapters_mode"', 'name="mapping_mode"', "docx-chapter-select",
+                        'name="split_panels"', 'name="workers"'):
+            self.assertNotIn(removed, form)
+        self.assertIn('name="presentation"', form)
 
     def test_default_structure_is_accepted_by_the_chapter_reader(self):
         self.assertEqual(len(app._read_chapters(app.DOCX_DEFAULT_CHAPTERS)), 17)
 
 
 class ReadWorkersTests(unittest.TestCase):
-    def test_form_value_is_clamped_and_defaults_apply(self):
+    def test_default_is_eight_and_env_is_clamped(self):
+        self.assertEqual(app.DOCX_DEFAULT_WORKERS, 8)
         with patch.dict("os.environ", {"DOCX_WORKERS": ""}):
-            self.assertEqual([app._read_workers(v) for v in ("1", "6", "99", "0", "-3", "abc", "")],
-                             [1, 6, app.MAX_WORKERS, 1, 1, app.DOCX_DEFAULT_WORKERS, app.DOCX_DEFAULT_WORKERS])
-        with patch.dict("os.environ", {"DOCX_WORKERS": "2"}):
-            self.assertEqual(app._read_workers(""), 2)
+            self.assertEqual(app._read_workers(), 8)
+        for raw, expected in (("2", 2), ("99", app.MAX_WORKERS), ("0", 1), ("-3", 1), ("abc", 8)):
+            with patch.dict("os.environ", {"DOCX_WORKERS": raw}):
+                self.assertEqual(app._read_workers(), expected, raw)
+
+    def test_workers_are_not_a_request_parameter_or_a_form_field(self):
+        html = app.app.test_client().get("/").get_data(as_text=True)
+        self.assertNotIn('name="workers"', html)
 
 
 class DocxStartValidationTests(unittest.TestCase):
@@ -521,6 +739,9 @@ class DocxStartValidationTests(unittest.TestCase):
         uploads.start()
         self.addCleanup(uploads.stop)
         self.uploads = Path(tmp.name) / "uploads"
+        chapters_mode = patch.dict("os.environ", {"DOCX_CHAPTERS_MODE": "daftar"})
+        chapters_mode.start()
+        self.addCleanup(chapters_mode.stop)
         self.client = app.app.test_client()
 
     def post(self, **overrides):

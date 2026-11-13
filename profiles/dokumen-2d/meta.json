@@ -25,5 +25,15 @@
       "file": "RDGB_Mei 2025_Buku 2d Bauran Kebijakan BI 2.pdf",
       "sha256": "9fad6fcfbd2cb11164d4271ee005a75d3582d9704718a64da13dcccc0576453d"
     }
-  ]
+  ],
+  "riwayat": [
+    {
+      "waktu": "2026-11-13T02:18:12+00:00",
+      "mode": "update",
+      "ditambah": [],
+      "diganti": [],
+      "dihapus": []
+    }
+  ],
+  "diperbarui_pada": "2026-11-13T02:18:12+00:00"
 }

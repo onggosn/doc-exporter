@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from collections import Counter, defaultdict
@@ -19,6 +20,7 @@ PROFILES_DIR = Path(os.environ.get("PROFILES_DIR", Path(__file__).resolve().pare
 SETTINGS_FILE = "settings.json"
 CHAPTERS_FILE = "chapters.json"
 STYLE_GUIDE_FILE = "style_guide.json"
+DEFAULT_SECTION_FILE = "default_section.json"
 STYLE_SAMPLES_FILE = "style_samples.json"
 PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 SECTION_NUMBER_PREFIX = re.compile(r"^\d+(?:\.\d+)*\.?\s*")
@@ -286,6 +288,51 @@ def save_style_guide(name: str, guide: dict[str, Any], model_id: str, dropped_ex
     return saved
 
 
+def validate_default_section(data: Any) -> dict[str, Any]:
+    """Pengaturan pemetaan section bawaan PowerPoint ("Default Section") untuk profil. Bentuk:
+    {"bagian_cocok": "Default Section", "judul_bab": "1. ...", "judul_kolom": "1.{n} ... {nama}",
+     "kolom": [{"cocok": "MONETER", "nama": "Moneter"}, ...]}. `cocok` dibandingkan dengan teks lencana kolom
+    sebagai kata utuh tanpa membedakan huruf besar; `{n}` = urutan kolom di daftar ini, `{nama}` = nama kolom."""
+    if not isinstance(data, dict):
+        raise ProfileError("default_section.json harus berupa objek.")
+
+    def text(key: str, required: bool = True) -> str:
+        value = data.get(key)
+        if value is None and not required:
+            return ""
+        if not isinstance(value, str) or not value.strip():
+            raise ProfileError(f"default_section.json: '{key}' harus berupa teks yang tidak kosong.")
+        return " ".join(value.split())
+
+    columns = data.get("kolom")
+    if not isinstance(columns, list) or not columns:
+        raise ProfileError("default_section.json: 'kolom' harus berupa daftar yang tidak kosong.")
+    cleaned = []
+    for index, column in enumerate(columns, start=1):
+        if not (isinstance(column, dict) and all(isinstance(column.get(k), str) and column[k].strip() for k in ("cocok", "nama"))):
+            raise ProfileError(f"default_section.json: kolom #{index} harus punya 'cocok' dan 'nama'.")
+        cleaned.append({"cocok": " ".join(column["cocok"].split()), "nama": " ".join(column["nama"].split())})
+    return {
+        "bagian_cocok": text("bagian_cocok"),
+        "judul_bab": text("judul_bab", required=False),
+        "judul_kolom": text("judul_kolom", required=False) or "{nama}",
+        "kolom": cleaned,
+    }
+
+
+def load_default_section(name: str) -> dict[str, Any] | None:
+    """Pengaturan section bawaan profil, atau None bila tidak ada atau rusak. Tanpa pengaturan, section bawaan
+    diproses apa adanya (tidak ada pemetaan khusus)."""
+    path = _profile_path(name) / DEFAULT_SECTION_FILE
+    if not path.is_file():
+        return None
+    try:
+        return validate_default_section(json.loads(path.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, ProfileError, OSError) as exc:
+        logging.getLogger(__name__).warning("Pengaturan section bawaan profil '%s' diabaikan: %s", name, exc)
+        return None
+
+
 def load_profile(name: str) -> dict[str, Any]:
     path = _profile_path(name)
     captions = _read(path, "captions")
@@ -313,6 +360,7 @@ def load_profile(name: str) -> dict[str, Any]:
         "settings": settings,
         "settings_saved": saved,
         "struktur_bab": load_chapters(name),
+        "default_section": load_default_section(name),
     }
 
 

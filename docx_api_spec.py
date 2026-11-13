@@ -43,15 +43,19 @@ DOCX_OPENAPI: dict[str, Any] = {
             ),
             "requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {
                 "type": "object",
-                "required": ["presentation", "profile"],
+                "required": ["presentation"],
                 "properties": {
                     "presentation": {"type": "string", "format": "binary", "description": "Berkas .pptx."},
-                    "profile": {"type": "string", "description": "Nama profil jenis dokumen, mis. dokumen-2d."},
-                    "chapters": {"type": "string", "description": "Judul bab, satu per baris (1 sampai 20)."},
-                    "struktur": {"type": "string", "description": "Nama struktur bab tersimpan di profil."},
+                    "profile": {"type": "string", "description": "Nama profil jenis dokumen. Bila kosong dipakai profil bawaan server (env DOCX_PROFILE, bawaan dokumen-2d)."},
+                    "chapters": {"type": "string", "description": "Judul bab, satu per baris (1 sampai 20). Hanya dipakai bila server diatur DOCX_CHAPTERS_MODE=daftar; bawaannya (slide) mengikuti section PowerPoint dan mengabaikannya."},
+                    "struktur": {"type": "string", "description": "Nama struktur bab tersimpan di profil. Hanya dipakai bila DOCX_CHAPTERS_MODE=daftar."},
                     "mapping_mode": {"type": "string", "enum": ["batch", "per_slide"], "default": "batch"},
-                    "split_panels": {"type": "string", "enum": ["ya", "tidak"], "default": "ya"},
-                    "workers": {"type": "integer", "minimum": 1, "maximum": 8, "description": "Worker paralel."},
+                    "style_guide": {"type": "string", "enum": ["ya", "tidak"], "default": "ya",
+                                    "description": "Pakai panduan gaya dari model (style_guide.json profil) di prompt narasi."},
+                    "fact_review": {"type": "string", "enum": ["tidak", "aturan", "model"], "default": "aturan",
+                                    "description": "Tinjauan fakta khusus ringkasan gambar (bukan narasi); hasilnya komentar Word, teks tidak diubah. aturan: angka, periode, arah perubahan tanpa model. model: aturan ditambah tinjauan model per slide yang ikut melihat gambarnya (menambah token)."},
+                    "format_review": {"type": "string", "enum": ["ya", "tidak"], "default": "ya",
+                                      "description": "Periksa format, urutan butir, dan penomoran pada halaman berbutir atau bernomor yang dibawa apa adanya dari slide; hasilnya komentar Word, teks tidak diubah."},
                     "model_id": {"type": "string"},
                     "region": {"type": "string"},
                 },
@@ -147,9 +151,10 @@ DOCX_OPENAPI: dict[str, Any] = {
                 "type": "object", "properties": {
                     "input_tokens": {"type": "integer"}, "output_tokens": {"type": "integer"}}}}}},
         "Report": {"type": "object", "properties": {
-            "slide": {"type": "integer", "description": "Slide yang diproses (setelah sampul dan lampiran keluar)."},
+            "slide": {"type": "integer", "description": "Slide yang diproses (setelah sampul, lampiran, dan agenda keluar)."},
             "gambar": {"type": "integer"}, "narasi": {"type": "integer"}, "gambar_diringkas": {"type": "integer"},
-            "slide_dikecualikan": {"type": "array", "items": {"type": "string"}, "description": "Mis. 'slide-1 (sampul)'."},
+            "slide_dipecah_kolom": {"type": "array", "items": {"type": "string"}, "description": "Slide berkolom di section bawaan yang dipecah per kolom menurut default_section.json profil, mis. 'slide-2 (3 kolom)'."},
+            "slide_dikecualikan": {"type": "array", "items": {"type": "string"}, "description": "Mis. 'slide-1 (sampul)', 'slide-3 (agenda)'."},
             "slide_dilewati": {"type": "array", "items": {"type": "string"}},
             "slide_dipecah": {"type": "array", "items": {"type": "string"}},
             "slide_teks": {"type": "array", "items": {"type": "string"}},
@@ -162,11 +167,24 @@ DOCX_OPENAPI: dict[str, Any] = {
                 "description": "Angka di narasi atau ringkasan yang tidak ada di teks slide; perlu diperiksa."},
             "bab_cadangan": {"type": "array", "items": {"type": "object", "properties": {
                 "bab": {"type": "string"}, "alasan": {"type": "string"}}},
-                "description": "Bab yang narasinya gagal sehingga memakai teks slide apa adanya."}}},
+                "description": "Bab yang narasinya gagal sehingga memakai teks slide apa adanya."},
+            "tinjauan_format": {"type": "array", "description": "Catatan format, urutan butir, dan penomoran; tiap catatan juga menjadi komentar Word.", "items": {"type": "object", "properties": {
+                "ref": {"type": "string"}, "jenis": {"type": "string", "enum": ["isi", "urutan", "format"]},
+                "pesan": {"type": "string"}, "teks": {"type": "string"}}}},
+            "tinjauan_fakta": {"type": "object", "description": "Catatan tinjauan fakta; tiap catatan juga menjadi komentar Word.", "properties": {
+                "mode": {"type": "string", "enum": ["tidak", "aturan", "model"]},
+                "jumlah_temuan": {"type": "integer"},
+                "temuan": {"type": "array", "items": {"type": "object", "properties": {
+                    "ref": {"type": "string"}, "sumber": {"type": "string", "enum": ["aturan", "model"]},
+                    "jenis": {"type": "string", "description": "angka, periode, arah, atau model"},
+                    "teks": {"type": "string"}, "pesan": {"type": "string"}}}},
+                "slide_ditinjau_model": {"type": "array", "items": {"type": "string"}},
+                "gagal_model": {"type": "array", "items": {"type": "object", "properties": {
+                    "ref": {"type": "string"}, "alasan": {"type": "string"}}}}}}}},
         "Options": {"type": "object", "properties": {
             "profil": {"type": "array", "items": {"type": "object", "properties": {
                 "name": {"type": "string"}, "title": {"type": "string"}}}},
-            "mapping_mode": {"type": "object"}, "split_panels": {"type": "object"},
+            "mapping_mode": {"type": "object"}, "style_guide": {"type": "object"}, "fact_review": {"type": "object"}, "format_review": {"type": "object"}, "chapters_mode": {"type": "object"},
             "workers": {"type": "object"}, "model_id": {"type": "string"},
             "region": {"type": "string", "nullable": True}, "bab": {"type": "object"},
             "batas_unggah_mb": {"type": "integer"}, "sesi_kedaluwarsa_detik": {"type": "integer"},

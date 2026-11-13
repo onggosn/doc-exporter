@@ -12,68 +12,39 @@
     <header>
       <p class="eyebrow">PPT → DOCX</p>
       <h1>Ubah PPT menjadi DOCX</h1>
-      <p class="intro">Fakta berasal dari PPT yang diunggah; format, gaya, susunan gambar, dan caption mengikuti profil jenis dokumen. Pilih profil, unggah PPT, lalu tinjau dan atur profilnya di bawah.</p>
+      <p class="intro">Fakta berasal dari PPT yang diunggah; format, gaya, susunan gambar, dan caption mengikuti profil jenis dokumen. Unggah PPT, lalu tinjau dan atur profilnya di bawah.</p>
     </header>
 
-    <section class="panel">
-      <h2>1. Jenis dokumen</h2>
-      <label class="field">
-        <span>Profil</span>
-        <select id="docx-profile-select" disabled></select>
-      </label>
-      <p class="help" id="docx-profile-summary"></p>
-    </section>
-
-    <form id="docx-create-form" class="panel">
-      <h2>2. Buat DOCX dari PPT</h2>
+    <form id="docx-create-form" class="panel" data-profile="{{ default_profile }}">
+      <h2>PPT to DOCX</h2>
       <label class="field">
         <span>Presentasi (.pptx)</span>
         <input type="file" name="presentation" accept=".pptx" required>
       </label>
       <label class="field">
-        <span>Struktur bab tersimpan di profil</span>
-        <select id="docx-chapter-select"></select>
-      </label>
-      <label class="field">
-        <span>Struktur bab (satu judul per baris)</span>
-        <textarea name="chapters" rows="18" required placeholder="Contoh:&#10;Ringkasan Asesmen&#10;Rekomendasi Kebijakan">{{ docx_default_chapters }}</textarea>
-        <small>Terisi dari struktur bawaan profil (kelola di panel 8) dan boleh diubah untuk proses ini saja. Judul bab dicocokkan dengan kata kunci aturan penomoran di profil (panel Penomoran caption).</small>
-      </label>
-      <div class="grid">
-        <label class="field">
-          <span>Model ID</span>
-          <input name="model_id" value="{{ model_id }}">
-        </label>
-        <label class="field">
-          <span>Region AWS (opsional)</span>
-          <input name="region" value="{{ region }}" placeholder="Contoh: ap-southeast-2">
-        </label>
-      </div>
-      <label class="field">
-        <span>Pemetaan slide ke bab</span>
-        <select name="mapping_mode">
-          <option value="batch">Sekaligus (lebih cepat)</option>
-          <option value="per_slide">Satu per satu (lebih teliti)</option>
+        <span>Panduan gaya penulisan</span>
+        <select name="style_guide">
+          <option value="ya">Pakai panduan gaya dari model (bila profil sudah memilikinya)</option>
+          <option value="tidak">Jangan pakai; hanya aturan format dari statistik referensi</option>
         </select>
+        <small>Panduan gaya (nada, sudut pandang, larangan, contoh kutipan) ikut dikirim di setiap panggilan narasi bab dan menambah token input. Mematikannya menghemat token; aturan format angka dan istilah dari statistik tetap dipakai.</small>
       </label>
       <label class="field">
-        <span>Worker paralel</span>
-        <select name="workers">
-          <option value="1">1 (berurutan)</option>
-          <option value="2">2</option>
-          <option value="4" selected>4 (disarankan)</option>
-          <option value="6">6</option>
-          <option value="8">8</option>
+        <span>Tinjauan fakta ringkasan gambar</span>
+        <select name="fact_review">
+          <option value="aturan">Aturan otomatis (angka, periode, arah perubahan), tanpa token tambahan</option>
+          <option value="model">Aturan ditambah tinjauan model terhadap gambar (menambah token)</option>
+          <option value="tidak">Jangan tinjau</option>
         </select>
-        <small>Jumlah panggilan Bedrock yang dijalankan bersamaan untuk deskripsi visual, pemetaan per slide, dan narasi bab. Lebih banyak worker lebih cepat tetapi lebih mudah terkena throttling; Bedrock otomatis memperlambat dan mengulang bila itu terjadi.</small>
+        <small>Hanya ringkasan gambar (caption) yang ditinjau, bukan narasi. Temuan tidak mengubah teks; dipasang sebagai komentar Word "Peninjau Fakta" pada ringkasan yang bersangkutan dan dirangkum di laporan. Tinjauan model memeriksa slide yang punya temuan aturan atau banyak angka (batas FACT_REVIEW_MIN_NUMBERS, bawaan 4) dan ikut melihat gambarnya.</small>
       </label>
       <label class="field">
-        <span>Slide bergambar</span>
-        <select name="split_panels">
-          <option value="ya">Pecah menjadi panel, tiap panel bercaption dari judulnya</option>
-          <option value="tidak">Satu gambar utuh per slide</option>
+        <span>Tinjauan format butir dan penomoran</span>
+        <select name="format_review">
+          <option value="ya">Periksa format, urutan butir, dan penomoran</option>
+          <option value="tidak">Jangan periksa</option>
         </select>
-        <small>Pemecahan memakai posisi chart, tabel, dan gambar di slide serta judul panelnya. Slide yang tidak bisa dipecah dengan yakin tetap satu gambar utuh.</small>
+        <small>Hanya halaman yang memuat butir atau daftar bernomor yang dibawa apa adanya dari slide. Yang diperiksa: isi dan urutan baris sama dengan slide, nomor berurutan (1, 2, 3 / a, b, c / i, ii, iii), gaya penanda konsisten, dan tingkat butir tidak melompat. Temuan dipasang sebagai komentar Word "Peninjau Format"; teks tidak diubah.</small>
       </label>
       <p class="notice">Teks dan gambar slide akan dikirim ke Amazon Bedrock. Slide bergambar, chart, diagram, dan tabel dijadikan gambar di dokumen. Pastikan presentasi boleh dikirim ke layanan model.</p>
       <div class="actions">
@@ -217,7 +188,7 @@
 
       <section class="panel">
         <h2>8. Struktur bab</h2>
-        <p class="help">Simpan struktur bab untuk jenis dokumen ini, satu atau beberapa (mis. satu per periode). Struktur bawaan mengisi kolom Struktur bab di panel 2 saat profil dipilih. Menyimpan di sini tidak mengubah penomoran caption, dan membangun ulang profil tidak menghapusnya.</p>
+        <p class="help">Simpan struktur bab untuk jenis dokumen ini, satu atau beberapa (mis. satu per periode). Struktur ini dipakai hanya bila server diatur memakai daftar bab (DOCX_CHAPTERS_MODE=daftar); bawaannya mengikuti section PowerPoint, jadi panel Buat DOCX tidak memilih struktur bab. Menyimpan di sini tidak mengubah penomoran caption, dan membangun ulang profil tidak menghapusnya.</p>
         <label class="field">
           <span>Struktur</span>
           <select id="docx-structure-select"></select>
@@ -231,7 +202,6 @@
           <textarea id="docx-structure-chapters" rows="14"></textarea>
         </label>
         <div class="actions">
-          <button type="button" class="button secondary" id="docx-structure-from-form">Ambil dari isian panel 2</button>
           <button type="button" class="button primary" id="docx-structure-save">Simpan struktur</button>
           <button type="button" class="button secondary" id="docx-structure-default">Jadikan bawaan</button>
           <button type="button" class="button secondary" id="docx-structure-delete">Hapus</button>

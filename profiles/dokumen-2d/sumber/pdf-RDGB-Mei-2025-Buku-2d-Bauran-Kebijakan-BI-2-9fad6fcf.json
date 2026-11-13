@@ -1,0 +1,93 @@
+{
+  "jenis": "pdf",
+  "file": "RDGB_Mei 2025_Buku 2d Bauran Kebijakan BI 2.pdf",
+  "sha256": "9fad6fcfbd2cb11164d4271ee005a75d3582d9704718a64da13dcccc0576453d",
+  "analisis": {
+    "file": "RDGB_Mei 2025_Buku 2d Bauran Kebijakan BI 2.pdf",
+    "halaman": 21,
+    "ukuran": {
+      "lebar_pt": 595.9,
+      "tinggi_pt": 842.9,
+      "nama": "A4"
+    },
+    "margin_pt": {
+      "kiri": 35.2,
+      "kanan": 34.2,
+      "atas": 58.3,
+      "bawah": 60.3,
+      "indent_isi": 56.1,
+      "metode": "jarak terkecil konten ke tepi halaman; indent_isi = median tepi kiri teks per halaman"
+    },
+    "nomor_halaman": {
+      "halaman_bernomor": 21,
+      "dari_halaman": 21,
+      "mulai": 1,
+      "posisi": {
+        "x0_pt": 546.5,
+        "top_pt": 795.1
+      },
+      "perataan": "kanan",
+      "font": "OpenSans-Regular",
+      "ukuran_pt": 10.5
+    },
+    "footer_berulang": [
+      {
+        "pola": "Approved by * at #/#/# #:#",
+        "halaman": 21,
+        "posisi": {
+          "x0_pt": 40.0,
+          "top_pt": 817.9
+        },
+        "font": "Poppins-Regular",
+        "ukuran_pt": 10.0,
+        "dikecualikan": true,
+        "alasan": "dibubuhkan alur persetujuan, bukan bagian format dokumen"
+      }
+    ],
+    "watermark": {
+      "teks": "RAHASIA",
+      "font": "Poppins-Regular",
+      "ukuran_pt_perkiraan": [
+        59.9,
+        81.4
+      ],
+      "sudut_derajat": 45,
+      "warna": "#808080",
+      "halaman": 21
+    },
+    "tipografi_pdf": {
+      "isi_dominan": {
+        "font": "Frutiger-Light",
+        "ukuran_pt": 7.3,
+        "bagian": 0.791
+      },
+      "teratas": [
+        {
+          "font": "Frutiger-Light",
+          "ukuran_pt": 7.3,
+          "bagian": 0.791
+        },
+        {
+          "font": "Frutiger-Light",
+          "ukuran_pt": 6.0,
+          "bagian": 0.102
+        },
+        {
+          "font": "Frutiger-Light",
+          "ukuran_pt": 8.0,
+          "bagian": 0.097
+        },
+        {
+          "font": "Frutiger-Light",
+          "ukuran_pt": 7.0,
+          "bagian": 0.009
+        },
+        {
+          "font": "Frutiger-Light",
+          "ukuran_pt": 4.5,
+          "bagian": 0.001
+        }
+      ]
+    }
+  }
+}

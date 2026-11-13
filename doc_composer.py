@@ -15,8 +15,13 @@ from typing import Any
 
 from PIL import Image, ImageChops
 
+import list_review
+
 
 LABEL_KINDS = ("Grafik", "Tabel", "Gambar", "Foto", "Skema", "Diagram")
+# Gambar yang luasnya lebih dari separuh kanvas slide dipasang selebar 100% halaman (satu sel penuh), bukan di
+# kolom kiri tabel dua kolom. Slide utuh diukur dari objek visual terbesarnya (visual_area), panel dari bbox-nya.
+FULL_WIDTH_MIN_AREA = 0.5
 IMAGE_REASONS = {"picture", "diagram_or_object", "chart"}
 DEFAULT_WIDTHS = [50, 50]
 SIDE_BY_SIDE_TOKENS = "I,T"
@@ -32,10 +37,11 @@ DEFAULT_CAPTION_FACTS_MAX_CHARS = 3000  # batas teks slide di prompt ringkasan g
 VERBATIM_CHAPTER_KEYWORDS = ("kesimpulan", "arahan")  # bab yang teksnya dibawa apa adanya, tanpa narasi model
 COVER_MAX_CHARS = 400
 LAMPIRAN_DIVIDER_MAX_CHARS = 300
+AGENDA_MAX_CHARS = 1500  # slide agenda/outline hanya daftar topik; yang lebih panjang dianggap isi
+AGENDA_HEADING = re.compile(r"(agenda|outline|daftar isi|garis besar)\b", re.I)
 LABEL_MAX_CHARS = 60
 LABEL_MIN_UPPER = 0.8
 TEXT_DOMINANT_CHARS = 1500
-TEXT_TABLE_DIGIT_RATIO = 0.2
 FILLER_CHARS = 300
 FILLER_LINES = 10
 FILLER_LINE_CHARS = 60
@@ -59,34 +65,42 @@ def trim_margins(path: str, padding: int = TRIM_PADDING_PX) -> None:
         rgb.crop(crop).save(path)
 
 
-def _table_cells(slide: dict[str, Any]) -> list[str]:
-    return [str(cell) for table in slide.get("tables") or [] for row in table for cell in row if str(cell).strip()]
-
-
 def text_dominant(slide: dict[str, Any]) -> bool:
-    """Isi slide pada dasarnya teks, jadi ditulis sebagai teks tanpa gambar: tanpa chart atau diagram, dan
-    (a) semua tabelnya berisi teks (sedikit sel berangka), atau (b) tanpa tabel, hanya elemen gambar
-    (biasanya dekorasi), dan teksnya panjang."""
-    if slide.get("charts") or set(slide.get("vision_reasons") or []) & {"chart", "diagram_or_object"}:
+    """Isi slide pada dasarnya teks, jadi ditulis sebagai teks tanpa gambar: tanpa tabel, chart, atau diagram,
+    hanya elemen gambar (biasanya dekorasi), dan teksnya panjang. Slide bertabel selalu dijadikan gambar."""
+    if slide.get("tables") or slide.get("charts") or set(slide.get("vision_reasons") or []) & {"chart", "diagram_or_object"}:
         return False
-    cells = _table_cells(slide)
-    if slide.get("tables"):
-        numeric = sum(bool(re.search(r"\d", cell)) for cell in cells)
-        return bool(cells) and numeric / len(cells) <= TEXT_TABLE_DIGIT_RATIO
     return len("\n".join(slide.get("text", []))) >= TEXT_DOMINANT_CHARS
 
 
 MIN_CROP_PX = 40
 
 
-def crop_panels(png_path: str, panels: list[dict[str, Any]], out_dir: Path, ref: str) -> list[dict[str, Any]]:
-    """Potong PNG slide (belum dipangkas marginnya) menjadi gambar per panel. Panel yang hasil potongannya
-    hampir kosong dibuang. Mengembalikan [{'header', 'bbox', 'image_path'}] sesuai urutan panel."""
+def crop_top(png_path: str, edge: float) -> None:
+    """Buang pita atas gambar slide (judul dan placeholder atas) sampai pecahan tinggi `edge`."""
+    if not 0 < edge < 1:
+        return
+    with Image.open(png_path) as image:
+        rgb = image.convert("RGB")
+        cut = round(edge * rgb.height)
+        if cut <= 0 or rgb.height - cut < MIN_CROP_PX:
+            return
+        cropped = rgb.crop((0, cut, rgb.width, rgb.height))
+    cropped.save(png_path)
+
+
+def crop_panels(
+    png_path: str, panels: list[dict[str, Any]], out_dir: Path, ref: str, content_top: float = 0.0
+) -> list[dict[str, Any]]:
+    """Potong PNG slide (belum dipangkas marginnya) menjadi gambar per panel. Bagian di atas `content_top`
+    (judul dan placeholder atas) tidak ikut. Panel yang hasil potongannya hampir kosong dibuang.
+    Mengembalikan [{'header', 'bbox', 'image_path'}] sesuai urutan panel."""
     result = []
     with Image.open(png_path) as image:
         rgb = image.convert("RGB")
         for number, panel in enumerate(panels, start=1):
             left, top, right, bottom = panel["bbox"]
+            top = max(top, content_top)
             box = (round(left * rgb.width), round(top * rgb.height), round(right * rgb.width), round(bottom * rgb.height))
             if box[2] - box[0] < MIN_CROP_PX or box[3] - box[1] < MIN_CROP_PX:
                 continue
@@ -97,7 +111,8 @@ def crop_panels(png_path: str, panels: list[dict[str, Any]], out_dir: Path, ref:
                 if saved.width < MIN_CROP_PX or saved.height < MIN_CROP_PX:
                     path.unlink(missing_ok=True)
                     continue
-            result.append({"header": panel.get("header"), "bbox": panel["bbox"], "image_path": str(path)})
+            result.append({"header": panel.get("header"), "bbox": panel["bbox"], "image_path": str(path),
+                           "facts": panel.get("facts")})
     return result
 
 
@@ -122,8 +137,10 @@ def is_verbatim_chapter(chapter: str) -> bool:
 
 
 def excluded_slides(items: list[dict[str, Any]]) -> dict[str, str]:
-    """Slide yang dikeluarkan dari seluruh proses: sampul (slide pertama bila hanya berisi teks pendek) dan
-    lampiran (dari slide pembatas "LAMPIRAN ..." pertama sampai akhir dek). Mengembalikan {ref: alasan}."""
+    """Slide yang dikeluarkan dari seluruh proses: sampul (slide pertama bila hanya berisi teks pendek), lampiran
+    (dari slide pembatas "LAMPIRAN ..." pertama sampai akhir dek), dan agenda/outline pembahasan (judul atau baris
+    pertamanya diawali "Agenda", "Outline", "Daftar isi", atau "Garis besar", tanpa tabel dan chart, dan tidak
+    panjang). Mengembalikan {ref: alasan}."""
     excluded: dict[str, str] = {}
     appendix = False
     for index, slide in enumerate(items):
@@ -137,7 +154,88 @@ def excluded_slides(items: list[dict[str, Any]]) -> dict[str, str]:
         elif index == 0 and not slide.get("tables") and not slide.get("charts") \
                 and sum(len(line) for line in lines) <= COVER_MAX_CHARS:
             excluded[slide["ref"]] = "sampul"
+        elif lines and AGENDA_HEADING.match(lines[0]) and len(lines[0]) <= LABEL_MAX_CHARS \
+                and not slide.get("tables") and not slide.get("charts") \
+                and sum(len(line) for line in lines) <= AGENDA_MAX_CHARS:
+            excluded[slide["ref"]] = "agenda"
     return excluded
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower())
+
+
+def match_column(header: str, columns: list[dict[str, str]]) -> int | None:
+    """Indeks kolom pengaturan profil yang cocok dengan teks lencana ("SP PUR" cocok dengan "SP"): sama persis
+    atau seluruh kata `cocok` ada di lencana. None bila tidak ada yang cocok atau lebih dari satu."""
+    header_words = _words(header)
+    found = [
+        index for index, column in enumerate(columns)
+        if _words(column["cocok"]) == header_words
+        or (_words(column["cocok"]) and all(word in header_words for word in _words(column["cocok"])))
+    ]
+    exact = [i for i in found if _words(columns[i]["cocok"]) == header_words]
+    return exact[0] if len(exact) == 1 else found[0] if len(found) == 1 else None
+
+
+def split_default_section(deck: dict[str, Any], config: dict[str, Any] | None) -> list[str]:
+    """Pecah slide berkolom di section bawaan PowerPoint ("Default Section") menjadi satu slide semu per kolom,
+    berjudul sesuai pengaturan profil (mis. "1.1 Kesimpulan dan Arahan Moneter"), berurutan seperti daftar kolom
+    profil. Teks kolom dibawa apa adanya. Slide asal diganti di deck["items"] dan di daftar slide section.
+    Tanpa pengaturan, tanpa section yang cocok, atau bila ada lencana yang tak cocok dengan pengaturan, slide
+    dibiarkan apa adanya. Mengembalikan ref slide asal yang dipecah (dan memberi deck["section_bawaan_dipakai"])."""
+    if not config:
+        return []
+    wanted = " ".join(config["bagian_cocok"].lower().split())
+    sections = [s for s in deck.get("sections") or [] if " ".join(s["nama"].lower().split()) == wanted]
+    if not sections:
+        return []
+    in_section = {ref for section in sections for ref in section["refs"]}
+    split: list[str] = []
+    for item in list(deck["items"]):
+        columns = item.get("kolom") or []
+        if item["ref"] not in in_section or len(columns) < 2:
+            continue
+        indexes = [match_column(column["header"], config["kolom"]) for column in columns]
+        if None in indexes or len(set(indexes)) != len(indexes):
+            continue
+        virtual = []
+        for index, column in sorted(zip(indexes, columns), key=lambda pair: pair[0]):
+            title = config["judul_kolom"].replace("{n}", str(index + 1)).replace("{nama}", config["kolom"][index]["nama"])
+            virtual.append({
+                "ref": f"{item['ref']}-k{index + 1}", "title": title, "text": list(column["text"]),
+                "verbatim": [{"label": "", "lines": list(column["text"])}], "tables": [], "charts": [],
+                "visual_desc": None, "visual_area": 0.0, "content_top": 0.0, "needs_vision": False,
+                "vision_reasons": [], "panels": [], "kolom_asal": item["ref"], "kolom_judul": title,
+            })
+        position = deck["items"].index(item)
+        deck["items"][position:position + 1] = virtual
+        for section in deck.get("sections") or []:
+            if item["ref"] in section["refs"]:
+                at = section["refs"].index(item["ref"])
+                section["refs"][at:at + 1] = [v["ref"] for v in virtual]
+        split.append(item["ref"])
+    if split:
+        deck["section_bawaan_dipakai"] = True
+    return split
+
+
+def pin_split_slides(chapters: list[str], mapping: dict[str, list[str]], items: list[dict[str, Any]]) -> None:
+    """Mode daftar bab: slide semu hasil pemecahan kolom dipasang ke bab yang nomornya sama dengan judulnya
+    ("1.1 ..." ke bab "1.1 ..."), tanpa menunggu pemetaan model. Tanpa bab bernomor sama, pemetaan model dibiarkan."""
+    def number(text: str) -> str | None:
+        match = re.match(r"\s*(\d+(?:\.\d+)*)\.?(?:\s|$)", text)
+        return match.group(1) if match else None
+
+    for item in items:
+        title = item.get("kolom_judul")
+        target = next((c for c in chapters if title and number(c) and number(c) == number(title)), None)
+        if target is None:
+            continue
+        for refs in mapping.values():
+            if item["ref"] in refs:
+                refs.remove(item["ref"])
+        mapping.setdefault(target, []).append(item["ref"])
 
 
 def split_verbatim(slide: dict[str, Any]) -> None:
@@ -168,16 +266,27 @@ def _is_label(line: str) -> bool:
         and sum(c.isupper() for c in letters) / len(letters) >= LABEL_MIN_UPPER
 
 
+LIST_MARKER = re.compile(r"^(\(?(?:\d{1,3}|[a-zA-Z]|[ivxlcdmIVXLCDM]{1,6})[.)])\s+(\S.*)$")
+
+
 def verbatim_blocks(lines: list[str]) -> list[dict[str, Any]]:
-    """Ubah baris teks asli menjadi blok dokumen tanpa mengubah isinya: baris berhuruf kapital pendek menjadi
-    label tebal, baris lain menjadi butir (yang menjorok tetap bersarang)."""
+    """Ubah baris teks asli menjadi blok dokumen tanpa mengubah isinya: baris bernomor ("1.", "a)") menjadi butir
+    bernomor dengan penandanya sendiri, baris berhuruf kapital pendek menjadi label tebal, baris lain menjadi
+    butir (yang menjorok tetap bersarang). Indentasi dua spasi per tingkat mengikuti slide."""
     blocks: list[dict[str, Any]] = []
     for line in lines:
         indent = len(line) - len(line.lstrip(" "))
         text = re.sub(r"[<>]", "", " ".join(line.split()))
         if not text:
             continue
-        if indent == 0 and _is_label(text):
+        numbered = LIST_MARKER.match(text)
+        if numbered:
+            item = {"marker": numbered.group(1), "text": numbered.group(2), "depth": min(indent // 2, 2)}
+            if blocks and blocks[-1]["type"] == "numbered":
+                blocks[-1]["items"].append(item)
+            else:
+                blocks.append({"type": "numbered", "items": [item]})
+        elif indent == 0 and _is_label(text):
             blocks.append({"type": "paragraph", "text": f"<b>{text}</b>"})
         else:
             item = " " * indent + text
@@ -197,7 +306,7 @@ def fact_text(slide: dict[str, Any]) -> str:
         parts += [chart.get("title", ""), " ".join(chart.get("categories", []))]
         for series in chart.get("series", []):
             parts += [str(series.get("name", "")), " ".join(str(v) for v in series.get("values", []) if v is not None)]
-    parts += [slide.get("notes") or "", slide.get("visual_desc") or ""]
+    parts += [slide.get("visual_desc") or ""]
     return "\n".join(p for p in parts if p)
 
 
@@ -281,6 +390,64 @@ def split_long(text: str, limit: int = MAX_NARRATION_CHARS) -> list[str]:
     return [piece for piece in pieces if piece]
 
 
+_MARK_NUMBER = re.compile(r"\s*\(\s*\d{1,3}\s*\)\s*$")
+_MARK_CONTINUED = re.compile(r"\s*(?:…|\.{3})?\s*\(\s*lanjutan\s*(?:…|\.{3})?\s*\)", re.I)
+_HEADING_LINE = re.compile(r"^\s*\d+(?:\.\d+)*\.?\s+(\S.*)$")
+
+
+def strip_continuation_marker(text: str) -> str:
+    """Hapus penanda sambungan "(1)", "(2)", ... di ujung dan "(lanjutan)" (beserta "…" sebelumnya)."""
+    cleaned = _MARK_CONTINUED.sub("", text or "")
+    cleaned = _MARK_NUMBER.sub("", cleaned)
+    return re.sub(r"\s*…\s*$", "", cleaned).rstrip()
+
+
+def _alnum(text: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", text.lower())
+
+
+def merge_continuations(items: list[dict[str, Any]]) -> None:
+    """Slide berurutan dengan judul sama yang bertanda sambungan ("(1)", "(2)", "lanjutan") dijadikan satu kesatuan:
+    penanda dihapus dari judul, slide sambungan ditandai `continues` (judulnya tidak diulang di dokumen), dan baris
+    sub-judul bernomor yang hanya mengulang ("2. Kebijakan Operasi Moneter (lanjutan)") dibuang dari teks slide."""
+    previous_key, previous_marked, seen = "", False, set()
+    for item in items:
+        original = (item.get("title") or "").strip()
+        cleaned = strip_continuation_marker(original)
+        marked = cleaned != original
+        key = _alnum(cleaned)
+        continues = bool(key) and key == previous_key and (marked or previous_marked)
+        if original:
+            item["title"] = cleaned
+        item["continues"] = continues
+        if not continues:
+            seen = set()
+        previous_key, previous_marked = key, marked
+
+        earlier = set(seen)
+
+        def fix(line: str) -> str | None:
+            base = strip_continuation_marker(line)
+            heading = _HEADING_LINE.match(base.strip())
+            if base != line.rstrip() and heading and _alnum(heading.group(1)) in earlier:
+                return None  # sub-judul yang sama sudah muncul di slide sebelumnya
+            return base
+
+        def fix_all(lines: list[str]) -> list[str]:
+            return [fixed for fixed in map(fix, lines) if fixed is not None and fixed.strip()]
+
+        for name in ("text", "text_original"):
+            if item.get(name):
+                item[name] = fix_all(item[name])
+        for block in item.get("verbatim") or []:
+            block["lines"] = fix_all(block["lines"])
+        for line in [*(item.get("text_original") or item.get("text") or []),
+                     *(line for block in item.get("verbatim") or [] for line in block["lines"])]:
+            heading = _HEADING_LINE.match(line.strip())
+            if heading:
+                seen.add(_alnum(heading.group(1)))
+
+
 def heading_level(chapter: str) -> int:
     """Tingkat judul dari nomor bab: '1.' → 1, '2.1 ...' → 2, '4.7.2' → 3. Tanpa nomor → 1."""
     match = re.match(r"\s*(\d+(?:\.\d+)*)\.?(?:\s|$)", chapter)
@@ -290,7 +457,8 @@ def heading_level(chapter: str) -> int:
 def is_filler(slide: dict[str, Any]) -> bool:
     """Sampul, agenda, pembatas bagian, atau penutup: tanpa judul, teks pendek berupa label (tanpa kalimat,
     persen, atau rupiah), tanpa tabel, chart, atau diagram. Dokumen referensi tidak memuat slide semacam ini."""
-    if (slide.get("title") or "").strip() or slide.get("tables") or slide.get("charts") or set(slide.get("vision_reasons") or []) & {"chart", "diagram_or_object"}:
+    if (slide.get("title") or "").strip() or slide.get("tables") or slide.get("charts") or slide.get("verbatim") \
+            or set(slide.get("vision_reasons") or []) & {"chart", "diagram_or_object"}:
         return False
     facts = fact_text({**slide, "title": "", "visual_desc": None})
     lines = [line for line in facts.splitlines() if line.strip()]
@@ -326,7 +494,67 @@ def trim_facts(facts: str, limit: int | None = None) -> str:
     return "\n".join(kept) + "\n(teks slide dipotong; sisanya tidak ditampilkan)"
 
 
-def image_summary_prompt(title: str | None, header: str | None, facts: str, feedback: str = "") -> str:
+PANEL_FACTS_MAX_CHARS = 600
+FALLBACK_LABELS = 3
+FALLBACK_LABEL_CHARS = 45  # label baris yang lebih panjang (kalimat) tidak disebut
+FALLBACK_COLUMNS = 6
+
+
+def panel_fact_text(facts: dict[str, Any] | None, limit: int = PANEL_FACTS_MAX_CHARS) -> str:
+    """Isi satu panel (teks, tabel, chart) sebagai teks untuk prompt ringkasan; dipotong pada batas baris."""
+    if not facts:
+        return ""
+    lines = list(facts.get("text") or [])
+    lines += [" | ".join(str(cell) for cell in row) for table in facts.get("tables") or [] for row in table]
+    for chart in facts.get("charts") or []:
+        lines.append("; ".join(part for part in (
+            chart.get("title", ""), " ".join(chart.get("categories", [])),
+            *(f"{item.get('name', '')}: {' '.join(str(v) for v in item.get('values', []) if v is not None)}"
+              for item in chart.get("series", [])),
+        ) if part))
+    return trim_facts("\n".join(line for line in lines if line.strip()), limit)
+
+
+def fallback_summary(facts: dict[str, Any] | None) -> str:
+    """Ringkasan deterministik dari fakta tabel/chart panel (tanpa model) agar kolom caption tidak kosong.
+    Hanya memuat apa yang tertulis di slide; kosong bila panel tidak punya tabel atau chart."""
+    if not facts:
+        return ""
+    sentences = []
+    tables, charts = facts.get("tables") or [], facts.get("charts") or []
+    numeric = re.compile(r"[-+()]*\d[\d.,%\s()+-]*")
+    cleaned = [[row for row in ([" ".join(str(cell).split()) for cell in raw] for raw in table) if any(row)] for table in tables]
+    cleaned = [rows for rows in cleaned if rows]
+    for number, rows in enumerate(cleaned, start=1):
+        first_data = next((i for i, row in enumerate(rows) if any(numeric.fullmatch(cell) for cell in row[1:])), len(rows))
+        header_rows, data_rows = rows[:first_data], rows[first_data:]
+        title = ""
+        if len(header_rows) > 1 and not any(header_rows[0][1:]):
+            title, header_rows = header_rows[0][0], header_rows[1:]
+        columns = list(dict.fromkeys(cell for row in header_rows for cell in row[1:] if cell))[:FALLBACK_COLUMNS]
+        labels = [row[0] for row in data_rows if row and row[0] and len(row[0]) <= FALLBACK_LABEL_CHARS]
+        name = "Tabel" if len(cleaned) == 1 else f"Tabel ke-{number}"
+        sentence = f"{name} {title}".strip() + f" memuat {len(data_rows) or len(rows)} baris data"
+        if labels:
+            sentence += f", antara lain {', '.join(labels[:FALLBACK_LABELS])}"
+        if columns:
+            sentence += f" dengan kolom {', '.join(columns)}"
+        sentences.append(sentence + ".")
+    for chart in charts:
+        names = [str(item.get("name", "")).strip() for item in chart.get("series", []) if str(item.get("name", "")).strip()]
+        categories = [str(c) for c in chart.get("categories", [])]
+        sentence = "Grafik" + (f" {chart['title']}" if chart.get("title") else "")
+        if names:
+            sentence += f" memuat seri {', '.join(names[:FALLBACK_COLUMNS])}"
+        if len(categories) >= 2:
+            sentence += f" untuk periode {categories[0]} hingga {categories[-1]}"
+        if sentence != "Grafik":
+            sentences.append(sentence + ".")
+    return clean_summary(" ".join(sentences[:2]))
+
+
+def image_summary_prompt(title: str | None, header: str | None, facts: str, feedback: str = "",
+                         panel_facts: str = "") -> str:
     """Prompt ringkasan gambar untuk caption: hanya yang terlihat pada gambar, tanpa fakta tambahan."""
     return (
         "Tulis ringkasan 1-2 kalimat (maksimal 350 karakter) tentang apa yang ditampilkan gambar ini, untuk "
@@ -339,15 +567,21 @@ def image_summary_prompt(title: str | None, header: str | None, facts: str, feed
         "- Teks polos tanpa markdown, tanpa tag, tanpa simbol poin.\n\n"
         f"Judul slide: {title or '(tanpa judul)'}\n"
         f"Judul panel gambar: {header or '(tanpa judul)'}\n"
-        f"Teks slide (hanya untuk mencocokkan angka dan istilah):\n{facts or '(tidak ada)'}"
+        + (f"Isi panel ini menurut file slide (acuan fakta; pastikan sesuai gambar):\n{panel_facts}\n" if panel_facts else "")
+        + f"Teks slide (hanya untuk mencocokkan angka dan istilah):\n{facts or '(tidak ada)'}"
         f"{feedback}"
     )
 
 
-def panels_summary_prompt(title: str | None, headers: list[str | None], facts: str) -> str:
+def panels_summary_prompt(title: str | None, headers: list[str | None], facts: str,
+                          panel_facts: list[str] | None = None) -> str:
     """Prompt satu panggilan untuk beberapa panel dari slide yang sama: teks slide dikirim sekali saja."""
     keys = json.dumps({str(number): "…" for number in range(1, len(headers) + 1)}, ensure_ascii=False)
-    listing = "\n".join(f"Panel {number}: {header or '(tanpa judul)'}" for number, header in enumerate(headers, start=1))
+    panel_facts = panel_facts or [""] * len(headers)
+    listing = "\n".join(
+        f"Panel {number}: {header or '(tanpa judul)'}" + (f"\n  Isi panel menurut file slide: {detail}" if detail else "")
+        for number, (header, detail) in enumerate(zip(headers, panel_facts), start=1)
+    )
     return (
         f"Ada {len(headers)} gambar panel dari satu slide. Untuk SETIAP panel, tulis ringkasan 1-2 kalimat "
         "(maksimal 350 karakter) tentang apa yang ditampilkan gambarnya, untuk caption dokumen resmi berbahasa "
@@ -443,6 +677,51 @@ def parse_narration(
                 raise NarrationError(f"slide {ref} memuat markdown atau tag selain <i> dan <b>")
         result[ref] = cleaned
     return result
+
+
+REVIEW_MAX_FINDINGS = 6
+
+
+def review_prompt(title: str | None, paragraphs: list[str], facts: str, with_image: bool) -> str:
+    """Prompt tinjauan fakta ringkasan gambar satu slide: model hanya menandai, tidak menulis ulang."""
+    listing = "\n".join(f"[{i}] {text}" for i, text in enumerate(paragraphs, start=1))
+    source = "fakta tertulis slide" + (" dan gambar yang menyertai tiap paragraf" if with_image else "")
+    return (
+        "Anda peninjau fakta untuk dokumen yang disusun dari slide presentasi. Tiap paragraf di bawah ini adalah "
+        f"ringkasan sebuah gambar (grafik, tabel, atau diagram) dari slide. Periksa apakah paragraf sesuai dengan {source}.\n\n"
+        "Tandai HANYA klaim yang salah: angka, nama, periode, atau arah perubahan yang bertentangan dengan sumber, "
+        "atau fakta penting yang tidak ada di sumber (misalnya sebab, prediksi, atau angka karangan). "
+        "Angka dan teks yang jelas terbaca pada gambar adalah sumber yang sah. "
+        "Jangan menilai gaya bahasa, jangan menandai ringkasan yang wajar, dan jangan menulis ulang paragraf.\n"
+        "Jawab hanya dengan JSON: "
+        '{"temuan": [{"paragraf": <nomor>, "kutipan": "<potongan kalimat bermasalah, maks 120 karakter>", '
+        '"alasan": "<satu kalimat: apa yang salah dan apa kata sumber>"}]}. '
+        f'Bila semua benar, jawab {{"temuan": []}}. Maksimal {REVIEW_MAX_FINDINGS} temuan.\n\n'
+        f"Judul slide: {title or '(tanpa judul)'}\n\nFakta tertulis slide:\n{facts}\n\nParagraf yang ditinjau:\n{listing}"
+    )
+
+
+def parse_review(data: Any, count: int) -> list[dict[str, Any]]:
+    """Temuan valid dari jawaban model: nomor paragraf di 1..count dan alasan tidak kosong; sisanya dibuang."""
+    items = data.get("temuan") if isinstance(data, dict) else None
+    result = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        number, reason = item.get("paragraf"), item.get("alasan")
+        if isinstance(number, str) and number.strip().isdigit():
+            number = int(number)
+        if not (isinstance(number, int) and not isinstance(number, bool) and 1 <= number <= count):
+            continue
+        if not (isinstance(reason, str) and reason.strip()):
+            continue
+        quote = item.get("kutipan")
+        result.append({
+            "paragraf": number,
+            "kutipan": " ".join(quote.split())[:120] if isinstance(quote, str) else "",
+            "alasan": " ".join(reason.split())[:400],
+        })
+    return result[:REVIEW_MAX_FINDINGS]
 
 
 def normalize_number(token: str) -> str:
@@ -572,8 +851,17 @@ def compose(
     narration: dict[str, list[str]],
     settings: dict[str, Any],
     row_patterns: list[dict[str, Any]],
+    review: dict[tuple[str, str], list[str]] | None = None,
+    review_lists: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Kembalikan (spesifikasi untuk docx_builder, laporan susunan)."""
+    """Kembalikan (spesifikasi untuk docx_builder, laporan susunan). `review` (ref, teks ringkasan gambar) -> catatan
+    tinjauan fakta, dipasang sebagai komentar Word pada ringkasan yang sama. `review_lists` memeriksa format, urutan
+    butir, dan penomoran pada blok daftar yang dibawa apa adanya (list_review) dan mencatat temuannya di laporan."""
+
+    def paragraph(ref: str, text: str) -> dict[str, Any]:
+        notes = (review or {}).get((ref, text))
+        return {"type": "paragraph", "text": text, **({"comments": list(notes)} if notes else {})}
+
     order = {slide["ref"]: i for i, slide in enumerate(deck["items"])}
     by_ref = {slide["ref"]: slide for slide in deck["items"]}
     widths = pick_widths(row_patterns)
@@ -581,7 +869,7 @@ def compose(
     blocks: list[dict[str, Any]] = []
     report: dict[str, Any] = {
         "slide": len(deck["items"]), "gambar": 0, "narasi": 0, "slide_dilewati": [], "slide_teks": [], "slide_dipecah": [], "slide_teks_asli": [], "gambar_diringkas": 0, "bab_kosong": [],
-        "aturan_bab": {},
+        "aturan_bab": {}, "tinjauan_format": [],
     }
 
     for chapter in chapters:
@@ -593,6 +881,7 @@ def compose(
         report["aturan_bab"][chapter] = numbering.rules_for(chapter)
 
         verbatim_chapter = is_verbatim_chapter(chapter)
+        last_title = ""  # judul slide yang terakhir tampil di bab ini; slide sambungan tidak mengulangnya
         for ref in refs:
             slide = by_ref[ref]
             if is_filler(slide):
@@ -600,24 +889,29 @@ def compose(
                 continue
             if verbatim_chapter:  # kesimpulan/arahan: seluruh teks slide apa adanya, tanpa narasi model
                 points = []
-                verbatim = verbatim_blocks(slide.get("text_original") or slide.get("text", []))
+                source_lines = slide.get("text_original") or slide.get("text", [])
             else:
                 points = narration.get(ref) or []
-                verbatim = verbatim_blocks(
-                    [line for block in slide.get("verbatim") or [] for line in (block["label"], *block["lines"])]
-                )
+                source_lines = [line for block in slide.get("verbatim") or [] for line in (block["label"], *block["lines"])]
+            verbatim = verbatim_blocks(source_lines)
+            if review_lists:
+                report["tinjauan_format"] += [
+                    {"ref": ref, **finding} for finding in list_review.review_blocks(source_lines, verbatim)]
             needs_image = bool(slide.get("image_path") and slide_needs_image(slide))
             if not (needs_image or points or verbatim):
                 report["slide_dilewati"].append(ref)
                 continue
-            if (verbatim or (points and not needs_image)) and (slide.get("title") or "").strip():
-                blocks.append({"type": "heading", "level": min(heading_level(chapter) + 1, 3), "text": slide["title"].strip()})
+            title = (slide.get("title") or "").strip()
+            if (verbatim or (points and not needs_image)) and title and not (slide.get("continues") and title == last_title) \
+                    and " ".join(title.lower().split()) != " ".join(chapter.lower().split()):
+                blocks.append({"type": "heading", "level": min(heading_level(chapter) + 1, 3), "text": title})
+                last_title = title
             if verbatim:
                 blocks += verbatim
                 report["slide_teks_asli"].append(ref)
             if needs_image:
                 # Tiap gambar satu baris tabel dua kolom: gambar | caption (judul panel dan ringkasan gambar).
-                units: list[tuple[str, dict[str, Any] | None, str]] = []
+                units: list[tuple[str, dict[str, Any] | None, str, float]] = []
                 panels = slide.get("panel_images") or []
                 if len(panels) >= 2:
                     for panel in sorted(panels, key=lambda p: (round(p["bbox"][1], 1), p["bbox"][0])):
@@ -625,21 +919,32 @@ def compose(
                         caption = numbering.caption_for({**slide, "title": header}, chapter)
                         if caption is None and header:
                             caption = {"text": header, "tipe": "headline"}
-                        units.append((panel["image_path"], caption, panel.get("summary") or ""))
+                        left, top, right, bottom = panel["bbox"]
+                        units.append((panel["image_path"], caption, panel.get("summary") or "", (right - left) * (bottom - top)))
                     report["slide_dipecah"].append(f"{ref} ({len(panels)} panel)")
                 else:
-                    units.append((slide["image_path"], numbering.caption_for(slide, chapter), slide.get("summary") or ""))
-                table_rows = []
-                for path, caption, summary in units:
+                    units.append((slide["image_path"], numbering.caption_for(slide, chapter), slide.get("summary") or "", slide.get("visual_area") or 0.0))
+                table_rows: list[list[list[dict[str, Any]]]] = []
+
+                def flush_table() -> None:
+                    if table_rows:
+                        blocks.append({"type": "table", "widths": widths, "rows": list(table_rows)})
+                        table_rows.clear()
+
+                for path, caption, summary, area in units:
                     caption_cell: list[dict[str, Any]] = []
                     if caption:
                         caption_cell.append({"type": "caption", **caption, "align": "left"})
                     if summary:
-                        caption_cell.append({"type": "paragraph", "text": summary})
+                        caption_cell.append(paragraph(ref, summary))
                         report["gambar_diringkas"] += 1
                     image_cell = [{"type": "image", "source": path}]
-                    table_rows.append([image_cell, caption_cell] if caption_cell else [image_cell])
-                blocks.append({"type": "table", "widths": widths, "rows": table_rows})
+                    if area > FULL_WIDTH_MIN_AREA:  # gambar besar: di luar tabel, selebar halaman, caption dan ringkasan di bawahnya
+                        flush_table()
+                        blocks += image_cell + caption_cell
+                    else:
+                        table_rows.append([image_cell, caption_cell])  # kolom kanan tetap ada walau kosong: lebar gambar seragam
+                flush_table()
                 blocks += [{"type": "paragraph", "text": text} for text in points]
                 report["gambar"] += len(units)
             elif points:

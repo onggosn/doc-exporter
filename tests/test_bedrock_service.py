@@ -71,7 +71,8 @@ class BedrockDocumentGeneratorTests(unittest.TestCase):
 
 class MappingTextTests(unittest.TestCase):
     SLIDE = {
-        "ref": "slide-7", "title": "Inflasi", "notes": "Catatan " * 100, "visual_desc": "Grafik garis inflasi.",
+        "ref": "slide-7", "title": "Inflasi", "notes": "Catatan " * 100,  # notes lama tidak boleh ikut terkirim
+         "visual_desc": "Grafik garis inflasi.",
         "text": ["Inflasi terkendali " * 60, "baris kedua"],
         "tables": [[["Komoditas", "Mei", "Juni"], ["Beras", "123456", "654321"]]],
         "charts": [{"title": "Laju inflasi", "categories": ["Jan", "Feb"],
@@ -87,7 +88,7 @@ class MappingTextTests(unittest.TestCase):
         for expected in ("slide-7", "Inflasi", "Chart: Laju inflasi; IHK", "Header tabel: Komoditas Mei Juni",
                          "Deskripsi visual: Grafik garis inflasi."):
             self.assertIn(expected, text)
-        for dropped in ("Beras", "654321", "1.1", "Jan"):
+        for dropped in ("Beras", "654321", "1.1", "Jan", "Catatan", "Speaker"):
             self.assertNotIn(dropped, text)
 
     def test_text_is_cut_at_the_limit_and_much_shorter_than_before(self):
@@ -376,6 +377,35 @@ class ImageSummaryTests(unittest.TestCase):
                 self.generator().summarize_panels(split, split["panel_images"])
             self.assertEqual(converse.call_count, 3)
             self.assertEqual([p["summary"] for p in split["panel_images"]], ["Panel A.", "Panel B."])
+
+    TABLE_FACTS = {"text": [], "charts": [], "tables": [
+        [["Asumsi"], ["", "Baseline", "PR"], ["Nilai Tukar", "16.880", "17.260"], ["Yield SBN (%)", "6,7%", "7,3%"]]]}
+
+    def test_empty_model_summary_falls_back_to_facts_of_the_panel_table(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            deck = self.make_deck(tmp)
+            split = deck["items"][0]
+            split["panel_images"][0]["facts"] = self.TABLE_FACTS
+            replies = ['{"1": "", "2": "Panel B."}', "", ""]  # gabungan kosong untuk panel A, ulang per panel juga kosong
+            with patch.object(BedrockDocumentGenerator, "_converse", side_effect=replies):
+                self.generator().summarize_panels(split, split["panel_images"])
+            summary = split["panel_images"][0]["summary"]
+            self.assertIn("Nilai Tukar", summary)
+            self.assertIn("Baseline", summary)
+            self.assertEqual(split["panel_images"][0]["summary_flagged"], [])
+
+    def test_panel_facts_are_sent_with_the_panel_in_the_combined_prompt(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            deck = self.make_deck(tmp)
+            split = deck["items"][0]
+            split["panel_images"][1]["facts"] = self.TABLE_FACTS
+            with patch.object(BedrockDocumentGenerator, "_converse", return_value=self.PANEL_JSON) as converse:
+                self.generator().summarize_panels(split, split["panel_images"])
+            prompt = converse.call_args.args[0][0]["text"]
+            self.assertIn("Isi panel menurut file slide: Asumsi", prompt)
+            self.assertIn("Nilai Tukar | 16.880 | 17.260", prompt)
 
 
 class ParallelStepsTests(unittest.TestCase):

@@ -85,7 +85,7 @@ def run_parallel(items, worker, workers=1, stop_on_error=True, on_done=None):
     return outcomes
 
 
-DEFAULT_MODEL_ID = "global.anthropic.claude-opus-4-6-v1"
+DEFAULT_MODEL_ID = "moonshotai.kimi-k2.5"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAPPING_TEXT_MAX_CHARS = 2000  # teks per slide pada prompt pemetaan; env MAPPING_TEXT_MAX_CHARS
 
@@ -257,6 +257,7 @@ class BedrockDocumentGenerator:
             image = Path(slide["image_path"]).read_bytes()
             if len(image) > MAX_IMAGE_BYTES:
                 logger.warning("Ringkasan %s dilewati: gambar %s bytes > batas", slide["ref"], len(image))
+                slide["summary"], slide["summary_flagged"] = doc_composer.fallback_summary(slide), []
                 return
             slide["summary"], slide["summary_flagged"] = self.summarize_image(image, slide, None)
 
@@ -280,13 +281,15 @@ class BedrockDocumentGenerator:
             image = Path(panel["image_path"]).read_bytes()
             if len(image) > MAX_IMAGE_BYTES:
                 logger.warning("Ringkasan %s dilewati: gambar %s bytes > batas", slide["ref"], len(image))
+                panel["summary"], panel["summary_flagged"] = doc_composer.fallback_summary(panel.get("facts")), []
                 continue
             items.append((panel, image))
         facts = doc_composer.all_facts({**slide, "visual_desc": None})  # lengkap, untuk pemeriksaan angka
         summaries: dict[int, str] = {}
         if len(items) >= 2:
             content: list[dict[str, Any]] = [{"text": doc_composer.panels_summary_prompt(
-                slide.get("title"), [panel.get("header") for panel, _ in items], doc_composer.trim_facts(facts)
+                slide.get("title"), [panel.get("header") for panel, _ in items], doc_composer.trim_facts(facts),
+                [doc_composer.panel_fact_text(panel.get("facts")) for panel, _ in items],
             )}]
             for number, (panel, image) in enumerate(items, start=1):
                 content.append({"text": f"Panel {number}: {panel.get('header') or '(tanpa judul)'}"})
@@ -307,18 +310,22 @@ class BedrockDocumentGenerator:
             if summary and not doc_composer.unsupported_numbers([summary], facts):
                 panel["summary"], panel["summary_flagged"] = summary, []
             else:
-                panel["summary"], panel["summary_flagged"] = self.summarize_image(image, slide, panel.get("header"))
+                panel["summary"], panel["summary_flagged"] = self.summarize_image(
+                    image, slide, panel.get("header"), panel.get("facts"))
 
     def summarize_image(
-        self, image: bytes, slide: dict[str, Any], header: str | None
+        self, image: bytes, slide: dict[str, Any], header: str | None, panel_facts: dict[str, Any] | None = None
     ) -> tuple[str, list[str]]:
         """Ringkasan 1-2 kalimat dari gambar itu sendiri untuk caption. Angka yang tidak ada di teks slide
-        diminta dibuang sekali; yang tersisa dikembalikan sebagai peringatan."""
+        diminta dibuang sekali; yang tersisa dikembalikan sebagai peringatan. Bila model tidak menghasilkan
+        ringkasan, dipakai ringkasan deterministik dari tabel/chart (`panel_facts`, atau slide untuk gambar utuh)."""
         facts = doc_composer.all_facts({**slide, "visual_desc": None})  # lengkap, untuk pemeriksaan angka
         feedback = ""
         summary, numbers = "", []
         for attempt in range(2):
-            prompt = doc_composer.image_summary_prompt(slide.get("title"), header, doc_composer.trim_facts(facts), feedback)
+            prompt = doc_composer.image_summary_prompt(
+                slide.get("title"), header, doc_composer.trim_facts(facts), feedback,
+                doc_composer.panel_fact_text(panel_facts))
             summary = doc_composer.clean_summary(self._converse(
                 [{"text": prompt}, {"image": {"format": "png", "source": {"bytes": image}}}],
                 max_tokens=300, step="captions",
@@ -330,12 +337,33 @@ class BedrockDocumentGenerator:
                 f"\n\nJawaban sebelumnya menyebut angka yang tidak ada di teks slide: {', '.join(numbers)}. "
                 "Tulis ulang tanpa angka itu; sebut hanya angka yang tertulis di teks slide."
             )
+        if not summary:
+            summary, numbers = doc_composer.fallback_summary(panel_facts or slide), []
         return summary, numbers
+
+    def review_slide(self, slide: dict[str, Any], paragraphs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Tinjauan fakta ringkasan gambar satu slide oleh model: tiap paragraf (ringkasan gambar atau panel, dengan
+        gambarnya di "gambar") dibandingkan dengan fakta tertulis slide dan gambar itu. Hanya menandai; tidak pernah
+        mengubah teks. Mengembalikan temuan [{"paragraf": nomor mulai 1, "kutipan", "alasan"}]."""
+        facts = doc_composer.trim_facts(doc_composer.all_facts(slide))
+        images: list[dict[str, Any]] = []
+        for number, paragraph in enumerate(paragraphs, start=1):
+            path = paragraph.get("gambar")
+            if path and Path(path).is_file():
+                data = Path(path).read_bytes()
+                if len(data) <= MAX_IMAGE_BYTES:
+                    images += [{"text": f"Gambar untuk paragraf [{number}]:"},
+                               {"image": {"format": "png", "source": {"bytes": data}}}]
+        prompt = doc_composer.review_prompt(
+            slide.get("title"), [p["teks"] for p in paragraphs], facts, bool(images))
+        parsed = self._parse_json(
+            self._converse([{"text": prompt}, *images], max_tokens=1500, step="review"), context="tinjauan fakta")
+        return doc_composer.parse_review(parsed, len(paragraphs))
 
     @staticmethod
     def _mapping_text(slide: dict[str, Any]) -> str:
         """Representasi ringkas slide khusus pemetaan ke bab: yang menentukan bab adalah topiknya, jadi cukup
-        judul, awal teks, judul chart dan nama seri, header tabel, serta potongan deskripsi visual dan notes.
+        judul, awal teks, judul chart dan nama seri, header tabel, serta potongan deskripsi visual.
         Isi angka tabel dan chart tidak dikirim. Panjang teks diatur env MAPPING_TEXT_MAX_CHARS (0 = tanpa batas)."""
         try:
             limit = int(os.environ.get("MAPPING_TEXT_MAX_CHARS", DEFAULT_MAPPING_TEXT_MAX_CHARS))
@@ -349,7 +377,7 @@ class BedrockDocumentGenerator:
             return text[:size].rsplit(" ", 1)[0] + "…"
 
         parts = [f"Referensi: {slide['ref']}", f"Judul: {slide.get('title') or '(tanpa judul)'}"]
-        body = cut(" | ".join(slide.get("text", [])), limit)
+        body = cut(" | ".join(slide.get("text_original") or slide.get("text", [])), limit)
         if body:
             parts.append("Teks: " + body)
         for chart in slide.get("charts") or []:
@@ -361,8 +389,6 @@ class BedrockDocumentGenerator:
             header = cut(" ".join(str(cell) for cell in (table[0] if table else [])), 200)
             if header:
                 parts.append("Header tabel: " + header)
-        if slide.get("notes"):
-            parts.append("Speaker notes: " + cut(slide["notes"], limit // 2 if limit > 0 else 0))
         if slide.get("visual_desc"):
             parts.append("Deskripsi visual: " + cut(slide["visual_desc"], limit if limit > 0 else 0))
         return "\n".join(parts)

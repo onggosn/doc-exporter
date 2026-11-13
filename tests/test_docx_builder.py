@@ -60,6 +60,19 @@ class PageSetupTests(unittest.TestCase):
         self.assertEqual(DEFAULT_PAGE_SETUP["margin"]["kiri"], 34.0)
 
 
+class NumberedListTests(unittest.TestCase):
+    def test_numbered_items_have_marker_tab_text_with_hanging_indent_per_depth(self):
+        document = build([{"type": "numbered", "items": [
+            {"marker": "1.", "text": "Kebijakan Suku Bunga", "depth": 0},
+            {"marker": "a.", "text": "Suku bunga tetap", "depth": 1},
+        ]}])
+        first, second = [p for p in document.paragraphs if p.text]
+        self.assertEqual((first.text, second.text), ("1.\tKebijakan Suku Bunga", "a.\tSuku bunga tetap"))
+        self.assertEqual((first.paragraph_format.left_indent.pt, first.paragraph_format.first_line_indent.pt), (22, -22))
+        self.assertEqual((second.paragraph_format.left_indent.pt, second.paragraph_format.first_line_indent.pt), (46, -22))
+        self.assertEqual(second.paragraph_format.tab_stops[0].position.pt, 46)
+
+
 class DocumentFormatTests(unittest.TestCase):
     def setUp(self):
         self.document = build([

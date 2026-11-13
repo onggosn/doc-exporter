@@ -1,0 +1,20 @@
+{
+  "dibuat_oleh": "profile_builder.py",
+  "bagian_cocok": "Default Section",
+  "judul_bab": "1. Kesimpulan Diskusi Hari 1 dan Arahan ADG",
+  "judul_kolom": "1.{n} Kesimpulan dan Arahan {nama}",
+  "kolom": [
+    {
+      "cocok": "MONETER",
+      "nama": "Moneter"
+    },
+    {
+      "cocok": "MAKROPRUDENSIAL",
+      "nama": "Makroprudensial"
+    },
+    {
+      "cocok": "SP",
+      "nama": "Sistem Pembayaran"
+    }
+  ]
+}

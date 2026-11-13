@@ -65,6 +65,26 @@ class DetectPanelsTests(unittest.TestCase):
         panels = sp.detect_panels(build_slide(layout), W, H)
         self.assertEqual([p["header"] for p in panels], [None, None])  # panel tanpa judul tetap dipakai bila besar
 
+    def test_plain_caption_over_several_objects_groups_them_into_one_panel(self):
+        layout = [("judul", "Plan B : Full Response", (0.4, 0.15, 0.58, 0.05)),
+                  ("gambar", None, (0.4, 0.21, 0.28, 0.3)), ("gambar", None, (0.7, 0.21, 0.28, 0.3)),
+                  ("judul", "Plan A : No Response", (0.02, 0.15, 0.35, 0.05)),
+                  ("gambar", None, (0.02, 0.21, 0.35, 0.3)),  # satu objek, tetapi serumpun ("Plan")
+                  ("judul", "Label lain", (0.02, 0.6, 0.35, 0.05)), ("gambar", None, (0.02, 0.66, 0.35, 0.3))]
+        panels = sp.detect_panels(build_slide(layout), W, H)
+        by_header = {p["header"]: p["bbox"] for p in panels}
+        self.assertEqual(set(by_header) - {None}, {"Plan B : Full Response", "Plan A : No Response"})
+        left, _, right, _ = by_header["Plan B : Full Response"]
+        self.assertTrue(left < 0.41 and right > 0.97)  # kedua gambar dalam satu kotak, tidak dipotong terpisah
+
+    def test_panel_box_starts_below_its_header_text(self):
+        layout = [("judul", "Plan B : Full Response", (0.4, 0.15, 0.58, 0.07)),
+                  ("gambar", None, (0.4, 0.19, 0.28, 0.3)), ("gambar", None, (0.7, 0.19, 0.28, 0.3)),
+                  ("judul", "Plan A : No Response", (0.02, 0.15, 0.35, 0.07)), ("gambar", None, (0.02, 0.2, 0.35, 0.3))]
+        panels = sp.detect_panels(build_slide(layout), W, H)
+        for panel in panels:  # gambar menjorok ke kotak judul 0,03, tetapi panel tidak memotong teks judulnya
+            self.assertGreaterEqual(panel["bbox"][1], 0.22 - 1e-9, panel["header"])
+
     def test_footnotes_are_not_headers(self):
         layout = TWO_PANELS + [("judul", "KET: DATA PER MEI 2025", (0.02, 0.83, 0.45, 0.04))]
         self.assertEqual([p["header"] for p in sp.detect_panels(build_slide(layout), W, H)],
@@ -106,6 +126,27 @@ class DetectVerbatimTests(unittest.TestCase):
 
 
 class CropAndComposeTests(unittest.TestCase):
+    def test_crop_top_removes_the_title_band_and_panels_start_below_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            png = Path(tmp) / "slide.png"
+            image = Image.new("RGB", (400, 200), "white")
+            image.paste(Image.new("RGB", (380, 40), "red"), (10, 0))  # pita judul di atas
+            image.paste(Image.new("RGB", (150, 100), "navy"), (20, 60))
+            image.paste(Image.new("RGB", (150, 100), "maroon"), (220, 60))
+            image.save(png)
+            panels = [{"bbox": (0.0, 0.0, 0.5, 1.0), "header": "A"}, {"bbox": (0.5, 0.0, 1.0, 1.0), "header": "B"}]
+            crops = dc.crop_panels(str(png), panels, Path(tmp), "s", content_top=0.25)
+            for crop in crops:
+                with Image.open(crop["image_path"]) as saved:
+                    self.assertNotIn((255, 0, 0), [color for _, color in saved.convert("RGB").getcolors(100000)])
+            dc.crop_top(str(png), 0.25)
+            with Image.open(png) as saved:
+                self.assertEqual(saved.size, (400, 150))
+                self.assertNotIn((255, 0, 0), [color for _, color in saved.convert("RGB").getcolors(100000)])
+            dc.crop_top(str(png), 0.0)  # tanpa pita atas: tidak berubah
+            with Image.open(png) as saved:
+                self.assertEqual(saved.size, (400, 150))
+
     def test_crop_panels_writes_one_file_per_panel_and_drops_tiny_ones(self):
         with tempfile.TemporaryDirectory() as tmp:
             png = Path(tmp) / "slide.png"
@@ -119,6 +160,20 @@ class CropAndComposeTests(unittest.TestCase):
             self.assertEqual([c["header"] for c in crops], ["A", "B"])
             self.assertTrue(all(Path(c["image_path"]).is_file() for c in crops))
             self.assertEqual(Path(crops[0]["image_path"]).name, "slide-5-panel1.png")
+
+    def test_panel_over_half_the_canvas_is_full_width_and_smaller_panels_stay_two_column(self):
+        item = {"ref": "s1", "title": "Judul", "text": ["Isi."], "tables": [], "charts": [], "visual_desc": None,
+                "vision_reasons": ["picture"], "image_path": "/tmp/whole.png",
+                "panel_images": [
+                    {"header": "BESAR", "bbox": (0.0, 0.0, 1.0, 0.55), "image_path": "/tmp/big.png", "summary": "Ringkasan besar."},
+                    {"header": "TEPAT", "bbox": (0.0, 0.6, 0.5, 1.0), "image_path": "/tmp/edge.png", "summary": "x"},
+                    {"header": "KECIL", "bbox": (0.5, 0.6, 1.0, 1.0), "image_path": "/tmp/small.png", "summary": "y"}]}
+        spec, _ = dc.compose({"items": [item]}, ["Bab"], {"Bab": ["s1"]}, {}, {"penomoran": [], "caption_default": "kosong"}, [])
+        blocks = spec["blocks"]
+        self.assertEqual([b["type"] for b in blocks[1:]], ["image", "caption", "paragraph", "table"])  # besar di luar tabel
+        self.assertEqual(blocks[1]["source"], "/tmp/big.png")
+        edge, small = blocks[4]["rows"]  # 0,2 dan 0,2 dari kanvas: tetap kolom kiri tabel dua kolom
+        self.assertEqual((len(edge), len(small)), (2, 2))
 
     def test_each_panel_is_its_own_row_with_header_and_summary_beside_the_image(self):
         item = {"ref": "s1", "title": "Judul slide", "text": ["Isi."], "tables": [], "charts": [], "notes": "",
@@ -135,7 +190,7 @@ class CropAndComposeTests(unittest.TestCase):
         self.assertEqual([r[0][0]["source"] for r in rows], ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"])  # urutan baca
         self.assertEqual(rows[0][1], [{"type": "caption", "text": "PANEL A", "tipe": "headline", "align": "left"},
                                       {"type": "paragraph", "text": "Ringkasan A."}])
-        self.assertEqual(len(rows[2]), 1)  # tanpa judul dan tanpa ringkasan: gambar saja
+        self.assertEqual((len(rows[2]), rows[2][1]), (2, []))  # tanpa judul dan ringkasan: kolom kanan kosong, gambar tetap di kiri
         self.assertEqual(spec["blocks"][2:4], [{"type": "paragraph", "text": "Poin satu."}, {"type": "paragraph", "text": "Poin dua."}])
         self.assertEqual((report["gambar"], report["gambar_diringkas"], report["slide_dipecah"]), (3, 2, ["s1 (3 panel)"]))
 

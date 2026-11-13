@@ -24,6 +24,8 @@ HEADER_MAX_GAP = 0.07  # jarak vertikal judul panel ke objeknya
 HEADER_MIN_OVERLAP = 0.5  # porsi lebar yang harus sejajar
 NOTE_PREFIXES = ("ket", "sumber", "source", "note", "catatan", "*", "#")  # '#' hanya bila bukan judul bernomor
 MERGE_OVERLAP = 0.4
+CAPTION_MIN_OBJECTS = 2  # teks berhuruf biasa jadi judul panel bila ada sekian objek tepat di bawahnya;
+# satu objek cukup bila teks serumpun dengan judul seperti itu (kata pertama sama, mis. "Plan A" dan "Plan B")
 MIN_PANEL_AREA = 0.04
 MIN_PANEL_SIDE = 0.12
 MIN_TOTAL_AREA = 0.25
@@ -73,7 +75,11 @@ def _has_visual_content(shape) -> bool:
     )
 
 
-def _header_text(shape, box: Box) -> str | None:
+def _header_text(shape, box: Box, relaxed: bool = False) -> str | None:
+    """Teks judul panel. `relaxed`: terima juga teks berhuruf biasa (mis. "Plan B : Full Response Fiskal");
+    pemanggil yang menilai apakah teks itu benar-benar judul bagi objek di bawahnya."""
+    if relaxed and shape.is_placeholder:
+        return None
     if not shape.has_text_frame or (shape.is_placeholder and "TITLE" in str(shape.placeholder_format.type)):
         return None
     paragraphs = [p for p in (" ".join("".join(r.text for r in para.runs).split()) for para in shape.text_frame.paragraphs) if p]
@@ -88,12 +94,17 @@ def _header_text(shape, box: Box) -> str | None:
         return None
     letters = [c for c in text if c.isalpha()]
     upper = sum(c.isupper() for c in letters) / len(letters) if letters else 0
-    return text if numbered or upper >= HEADER_MIN_UPPER else None
+    return text if numbered or relaxed or upper >= HEADER_MIN_UPPER else None
 
 
 def _horizontal_overlap(a: Box, b: Box) -> float:
     overlap = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
     return overlap / max(min(a[2] - a[0], b[2] - b[0]), 1e-9)
+
+
+def _is_below(header: Box, box: Box) -> bool:
+    """Objek tepat di bawah judul: jarak vertikal kecil dan lebar yang sejajar."""
+    return -0.03 <= box[1] - header[3] <= HEADER_MAX_GAP and _horizontal_overlap(header, box) >= HEADER_MIN_OVERLAP
 
 
 def _header_region(header: Box, headers: list[tuple[Box, str]], notes: list[Box], loose: list[tuple[Box, int]]) -> Box | None:
@@ -134,6 +145,7 @@ def detect_panels(slide, width: int, height: int) -> list[dict[str, Any]]:
     headers: list[tuple[Box, str]] = []
     loose: list[tuple[Box, int]] = []  # bentuk lepas (kotak diagram dsb.) dan panjang teksnya
     notes: list[Box] = []  # catatan kaki ("Ket:", "Sumber:") yang membatasi wilayah di atasnya
+    captions: list[tuple[Box, str]] = []  # teks berhuruf biasa yang mungkin judul panel
     for shape in slide.shapes:
         box = _box(shape, width, height)
         if box is None:
@@ -145,6 +157,10 @@ def detect_panels(slide, width: int, height: int) -> list[dict[str, Any]]:
         text = _header_text(shape, box)
         if text:
             headers.append((box, text))
+        else:
+            relaxed = _header_text(shape, box, relaxed=True)
+            if relaxed:
+                captions.append((box, relaxed))
         if shape.has_text_frame and shape.text_frame.text.strip().lower().startswith(NOTE_PREFIXES[:5]):
             notes.append(box)
         if not (shape.is_placeholder or shape.shape_type == MSO_SHAPE_TYPE.LINE):
@@ -153,22 +169,32 @@ def detect_panels(slide, width: int, height: int) -> list[dict[str, Any]]:
             else:
                 loose.append((box, len(shape.text_frame.text.strip()) if shape.has_text_frame else 0))
 
+    # Teks di atas beberapa tabel/gambar (mis. "Plan B : ...") adalah judul kelompok itu: objek di bawahnya satu
+    # panel, tidak dipotong terpisah karena konteksnya tidak bisa dipisahkan.
+    below_counts = [(box, text, sum(_is_below(box, obj) for obj in objects)) for box, text in captions]
+    accepted = [(box, text) for box, text, count in below_counts if count >= CAPTION_MIN_OBJECTS]
+    first_words = {text.split()[0].lower() for _, text in accepted}
+    headers += accepted + [
+        (box, text) for box, text, count in below_counts
+        if count == 1 and text.split()[0].lower() in first_words
+    ]
+
     panels: list[dict[str, Any]] = []
     for box in objects:
         best = None
         for header_box, text in headers:
             gap = box[1] - header_box[3]
-            if -0.03 <= gap <= HEADER_MAX_GAP and _horizontal_overlap(header_box, box) >= HEADER_MIN_OVERLAP:
+            if _is_below(header_box, box):
                 if best is None or gap < best[0]:
                     best = (gap, header_box, text)
-        header = best[2] if best else None
+        header, header_box = (best[2], best[1]) if best else (None, None)
         for panel in panels:
             if header and panel["header"] == header:
                 panel["bbox"] = _union(panel["bbox"], box)
                 break
         else:
             if header or _area(box) >= UNHEADED_MIN_AREA:
-                panels.append({"bbox": box, "header": header})
+                panels.append({"bbox": box, "header": header, "header_box": header_box})
 
     adjacent = True
     while adjacent:  # potongan tabel/gambar yang bersambungan tanpa judul adalah satu panel
@@ -208,7 +234,8 @@ def detect_panels(slide, width: int, height: int) -> list[dict[str, Any]]:
                 smaller = min(_area(first["bbox"]), _area(second["bbox"]))
                 if smaller and _intersection(first["bbox"], second["bbox"]) / smaller >= MERGE_OVERLAP:
                     first["bbox"] = _union(first["bbox"], second["bbox"])
-                    first["header"] = first["header"] or second["header"]
+                    if not first["header"]:
+                        first["header"], first["header_box"] = second["header"], second.get("header_box")
                     panels.remove(second)
                     merged = True
                     break
@@ -223,7 +250,13 @@ def detect_panels(slide, width: int, height: int) -> list[dict[str, Any]]:
     if len(panels) < 2 or sum(_area(p["bbox"]) for p in panels) < MIN_TOTAL_AREA:
         return []
     panels.sort(key=lambda p: (round(p["bbox"][1], 1), p["bbox"][0]))
-    return [
-        {"bbox": (max(0.0, l - PAD), max(0.0, t - PAD), min(1.0, r + PAD), min(1.0, b + PAD)), "header": p["header"]}
-        for p in panels for l, t, r, b in [p["bbox"]]
-    ]
+    result = []
+    for p in panels:
+        left, top, right, bottom = p["bbox"]
+        top = max(0.0, top - PAD)
+        header_box = p.get("header_box")
+        if header_box and top < header_box[3] < (top + bottom) / 2:  # teks judul tidak ikut terpotong ke gambar
+            top = header_box[3]
+        result.append({"bbox": (max(0.0, left - PAD), top, min(1.0, right + PAD), min(1.0, bottom + PAD)),
+                       "header": p["header"]})
+    return result

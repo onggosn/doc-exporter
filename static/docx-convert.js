@@ -1,6 +1,4 @@
 (() => {
-  const select = document.querySelector("#docx-profile-select");
-  const summary = document.querySelector("#docx-profile-summary");
   const body = document.querySelector("#docx-profile-body");
   const statusBox = document.querySelector("#docx-status");
   const layoutRows = document.querySelector("#docx-layout-table tbody");
@@ -46,17 +44,17 @@
   const STATS_ABBREVIATIONS = 5;
   const STATS_ITALIC_EXAMPLES = 6;
 
-  const chapterSelect = document.querySelector("#docx-chapter-select");
   const structureSelect = document.querySelector("#docx-structure-select");
   const structureName = document.querySelector("#docx-structure-name");
   const structureChapters = document.querySelector("#docx-structure-chapters");
-  const structureFromForm = document.querySelector("#docx-structure-from-form");
   const structureSave = document.querySelector("#docx-structure-save");
   const structureDefault = document.querySelector("#docx-structure-default");
   const structureDelete = document.querySelector("#docx-structure-delete");
   const structureState = document.querySelector("#docx-structure-state");
 
   const createForm = document.querySelector("#docx-create-form");
+  // Profil dipilih di server (DOCX_PROFILE, bawaan dokumen-2d), bukan di UI.
+  const profileName = createForm.dataset.profile;
   const createButton = document.querySelector("#docx-create-button");
   const progressPanel = document.querySelector("#docx-progress-panel");
   const progressFill = document.querySelector("#docx-progress-fill");
@@ -70,11 +68,7 @@
 
   const POLL_MS = 2000;
 
-  // Isi awal kolom Struktur bab dari server dipakai sebagai "bawaan aplikasi" bila profil belum punya struktur.
-  const chaptersField = createForm.elements.chapters;
-  const APP_STRUCTURE = "__aplikasi__";
   const NEW_STRUCTURE = "__baru__";
-  const APP_STRUCTURE_TEXT = chaptersField.defaultValue;
   const DELETE_LABEL = structureDelete.textContent;
 
   const RESET_LABEL = resetButton.textContent;
@@ -84,13 +78,11 @@
     berlanjut: "Berlanjut antarbagian",
   };
 
-  let profileName = "";
   let rules = [];
   let captionDefault = "headline";
   let saved = false;
   let dirty = false;
   let resetTimer = null;
-  let listLoaded = false;
   let structures = { bawaan: "", daftar: [] };
   let deleteTimer = null;
 
@@ -404,11 +396,31 @@
     if (report.slide_teks_asli.length) {
       lines.push(`Slide yang teksnya dibawa apa adanya (bab kesimpulan/arahan, atau blok Hasil Pembahasan Dewan Gubernur dan Key Takeaways): ${report.slide_teks_asli.join(", ")}.`);
     }
+    if ((report.slide_dipecah_kolom || []).length) {
+      lines.push(`Slide berkolom di section bawaan yang dipecah per kolom menurut pengaturan profil (default_section.json): ${report.slide_dipecah_kolom.join(", ")}.`);
+    }
     if (report.slide_dipecah.length) {
       lines.push(`Slide yang dipecah menjadi panel, tiap panel dengan caption dari judulnya (${report.slide_dipecah.length}): ${report.slide_dipecah.join(", ")}.`);
     }
     if (report.slide_teks.length) {
       lines.push(`Slide padat teks yang ditulis sebagai teks, tanpa gambar (${report.slide_teks.length}): ${report.slide_teks.join(", ")}. Aturannya di doc_composer.py (TEXT_DOMINANT_CHARS).`);
+    }
+    const review = report.tinjauan_fakta;
+    if (review && review.mode !== "tidak") {
+      const label = review.mode === "model" ? "aturan dan model" : "aturan";
+      lines.push(review.jumlah_temuan
+        ? `Tinjauan fakta ringkasan gambar (${label}): ${review.jumlah_temuan} catatan, semuanya ada sebagai komentar Word "Peninjau Fakta" (teks tidak diubah). ` +
+          review.temuan.map((item) => `${item.ref} [${item.jenis}] ${item.pesan}`).join(" | ")
+        : `Tinjauan fakta ringkasan gambar (${label}): tidak ada catatan.`);
+      if (review.mode === "model") {
+        lines.push(`Ditinjau model: ${review.slide_ditinjau_model.length} slide.` +
+          (review.gagal_model.length ? ` Gagal ditinjau: ${review.gagal_model.map((item) => item.ref).join(", ")}.` : ""));
+      }
+    }
+    const format = report.tinjauan_format || [];
+    if (format.length) {
+      lines.push(`Tinjauan format butir dan penomoran: ${format.length} catatan, semuanya ada sebagai komentar Word "Peninjau Format" (teks tidak diubah). ` +
+        format.map((item) => `${item.ref} [${item.jenis}] ${item.pesan}`).join(" | "));
     }
     if (report.bab_kosong.length) lines.push(`Bab tanpa slide (tidak dibuat): ${report.bab_kosong.join(", ")}.`);
     listItems(resultReport, lines);
@@ -436,22 +448,6 @@
     return structures.daftar.find((item) => item.nama === name);
   }
 
-  function fillFormChapters(name) {
-    const found = findStructure(name);
-    chaptersField.value = found ? found.bab.join("\n") : APP_STRUCTURE_TEXT;
-  }
-
-  // Pilihan di form Buat DOCX: struktur tersimpan profil, ditambah bawaan aplikasi.
-  function renderFormStructures() {
-    const options = structures.daftar.map(
-      (item) => new Option(item.nama + (item.nama === structures.bawaan ? " (bawaan)" : ""), item.nama),
-    );
-    options.push(new Option("Bawaan aplikasi", APP_STRUCTURE));
-    chapterSelect.replaceChildren(...options);
-    chapterSelect.value = structures.bawaan || APP_STRUCTURE;
-    fillFormChapters(chapterSelect.value);
-  }
-
   function showStructure(name) {
     const found = findStructure(name);
     structureSelect.value = found ? name : NEW_STRUCTURE;
@@ -463,10 +459,10 @@
     structureState.textContent = !found
       ? structures.daftar.length
         ? "Struktur baru: isi nama dan daftar bab, lalu simpan."
-        : "Profil ini belum punya struktur bab tersimpan. Form memakai bawaan aplikasi sampai Anda menyimpan satu."
+        : "Profil ini belum punya struktur bab tersimpan. Mode daftar bab memakai bawaan aplikasi sampai Anda menyimpan satu."
       : isDefault
-        ? "Struktur bawaan: mengisi kolom Struktur bab di panel 2 saat profil dipilih."
-        : "Struktur tersimpan. Klik Jadikan bawaan agar mengisi panel 2 otomatis.";
+        ? "Struktur bawaan: dipakai bila bab tidak mengikuti slide (DOCX_CHAPTERS_MODE=daftar)."
+        : "Struktur tersimpan. Klik Jadikan bawaan agar dipakai sebagai struktur bab bila bab tidak mengikuti slide.";
   }
 
   function renderEditor(selected) {
@@ -480,7 +476,6 @@
 
   function renderStructures(selected) {
     renderEditor(selected);
-    renderFormStructures();
   }
 
   async function putStructures(payload, message) {
@@ -502,10 +497,6 @@
 
   function renderProfile(profile) {
     const created = profile.meta.created_at ? profile.meta.created_at.slice(0, 10) : "-";
-    summary.textContent =
-      `${profile.layouts.length} layout dari ${profile.meta.sources.length} dokumen referensi ` +
-      `(dibuat ${created}). Caption: ${joinCounts(profile.caption_counts)}.`;
-
     fillTable(
       layoutRows,
       profile.layouts.map((layout) => {
@@ -557,31 +548,13 @@
   }
 
   async function loadProfile(name) {
-    profileName = name;
     body.hidden = true;
+    createButton.disabled = true;
     setStatus("Memuat profil…");
     try {
       renderProfile(await api(`/api/profiles/${encodeURIComponent(name)}`));
+      createButton.disabled = false;
       setStatus("");
-    } catch (error) {
-      setStatus(error.message, true);
-    }
-  }
-
-  async function loadList() {
-    setStatus("Memuat daftar profil…");
-    try {
-      const { profiles } = await api("/api/profiles");
-      listLoaded = true;
-      select.replaceChildren(...profiles.map((p) => new Option(p.title, p.name)));
-      select.disabled = profiles.length === 0;
-      createButton.disabled = profiles.length === 0;
-      if (profiles.length === 0) {
-        summary.textContent = "Belum ada profil. Buat dengan: python profile_builder.py <berkas.html> --name <nama>.";
-        setStatus("");
-        return;
-      }
-      await loadProfile(profiles[0].name);
     } catch (error) {
       setStatus(error.message, true);
     }
@@ -592,15 +565,6 @@
     resetButton.textContent = RESET_LABEL;
     resetButton.dataset.confirm = "";
   }
-
-  select.addEventListener("change", () => {
-    if (dirty && !window.confirm("Perubahan yang belum disimpan akan hilang. Lanjutkan?")) {
-      select.value = profileName;
-      return;
-    }
-    cancelResetConfirm();
-    loadProfile(select.value);
-  });
 
   createForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -696,16 +660,9 @@
     }
   });
 
-  chapterSelect.addEventListener("change", () => fillFormChapters(chapterSelect.value));
-
   structureSelect.addEventListener("change", () => {
     cancelDeleteConfirm();
     showStructure(structureSelect.value === NEW_STRUCTURE ? "" : structureSelect.value);
-  });
-
-  structureFromForm.addEventListener("click", () => {
-    structureChapters.value = chaptersField.value;
-    structureState.textContent = "Isian panel 2 disalin ke editor. Beri nama lalu simpan.";
   });
 
   structureSave.addEventListener("click", async () => {
@@ -762,5 +719,5 @@
     }
   });
 
-  if (!listLoaded) loadList();
+  loadProfile(profileName);
 })();

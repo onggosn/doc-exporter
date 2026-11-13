@@ -1,0 +1,98 @@
+{
+  "jenis": "pdf",
+  "file": "RDGB_Maret 2026_Buku 2d Pokok Pembahasan dan Rancangan Bauran Kebijakan.pdf",
+  "sha256": "e7f016a638dd607245f185eaedc570d393d879af3d096249d04bb4b4a31264b6",
+  "analisis": {
+    "file": "RDGB_Maret 2026_Buku 2d Pokok Pembahasan dan Rancangan Bauran Kebijakan.pdf",
+    "halaman": 51,
+    "ukuran": {
+      "lebar_pt": 595.9,
+      "tinggi_pt": 842.9,
+      "nama": "A4"
+    },
+    "margin_pt": {
+      "kiri": 33.7,
+      "kanan": 33.4,
+      "atas": 61.2,
+      "bawah": 56.7,
+      "indent_isi": 69.1,
+      "metode": "jarak terkecil konten ke tepi halaman; indent_isi = median tepi kiri teks per halaman"
+    },
+    "nomor_halaman": {
+      "halaman_bernomor": 51,
+      "dari_halaman": 51,
+      "mulai": 1,
+      "posisi": {
+        "x0_pt": 546.5,
+        "top_pt": 795.1
+      },
+      "perataan": "kanan",
+      "font": "NotoSans-Regular",
+      "ukuran_pt": 10.5
+    },
+    "footer_berulang": [
+      {
+        "pola": "Approved by * at #/#/# #:#",
+        "halaman": 51,
+        "posisi": {
+          "x0_pt": 40.0,
+          "top_pt": 817.9
+        },
+        "font": "Poppins-Regular",
+        "ukuran_pt": 10.0,
+        "dikecualikan": true,
+        "alasan": "dibubuhkan alur persetujuan, bukan bagian format dokumen"
+      }
+    ],
+    "watermark": {
+      "teks": "RAHASIA",
+      "font": "Poppins-Regular",
+      "ukuran_pt_perkiraan": [
+        59.9,
+        81.4
+      ],
+      "sudut_derajat": 45,
+      "warna": "#808080",
+      "halaman": 51
+    },
+    "tipografi_pdf": {
+      "isi_dominan": {
+        "font": "NotoSans-Regular",
+        "ukuran_pt": 11.0,
+        "bagian": 0.612
+      },
+      "teratas": [
+        {
+          "font": "NotoSans-Regular",
+          "ukuran_pt": 11.0,
+          "bagian": 0.612
+        },
+        {
+          "font": "NotoSans-Regular",
+          "ukuran_pt": 12.0,
+          "bagian": 0.194
+        },
+        {
+          "font": "NotoSans-Bold",
+          "ukuran_pt": 11.0,
+          "bagian": 0.075
+        },
+        {
+          "font": "Frutiger-Light",
+          "ukuran_pt": 10.0,
+          "bagian": 0.053
+        },
+        {
+          "font": "NotoSans-Italic",
+          "ukuran_pt": 11.0,
+          "bagian": 0.031
+        },
+        {
+          "font": "NotoSans-Regular",
+          "ukuran_pt": 9.0,
+          "bagian": 0.013
+        }
+      ]
+    }
+  }
+}
